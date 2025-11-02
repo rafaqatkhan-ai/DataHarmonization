@@ -1,0 +1,11 @@
+pandas
+numpy
+scikit-learn
+matplotlib
+openpyxl
+streamlit
+scipy
+gseapy          # optional but used for GSEA if provided
+scanpy          # optional; enables ComBat
+anndata         # optional; for scanpy
+umap-learn      # optional; enables UMAP plots
