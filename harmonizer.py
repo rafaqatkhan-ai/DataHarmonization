@@ -553,10 +553,24 @@ def run_pipeline(
     expr_filtered = expr_imputed.loc[pos.nlargest(topk).index]
 
     # 6) Batch collapsing + harmonization
+    # 6) Batch collapsing + harmonization  (fixed)
     meta["batch_collapsed"] = smart_batch_collapse(meta, min_batch_size_for_combat)
-    x_combat = _combat(expr_filtered, meta["batch_collapsed"])
-    expr_harmonized = x_combat or _fallback_center(expr_filtered, meta["batch_collapsed"])
-    mode = "ComBat" if x_combat is not None else "fallback_center"
+    
+    # Make sure batch labels are aligned to the expression matrix columns
+    meta_batch = meta["batch_collapsed"].reindex(expr_filtered.columns)
+    if meta_batch.isna().any():
+        # If any sample is missing a batch (shouldn't happen), backfill with its raw group tag
+        meta_batch = meta_batch.fillna(meta["group"].reindex(expr_filtered.columns).astype(str))
+
+    # Try ComBat; if it returns None, fall back deterministically
+    x_combat = _combat(expr_filtered, meta_batch)
+    if x_combat is not None:
+        expr_harmonized = x_combat
+        mode = "ComBat"
+    else:
+        expr_harmonized = _fallback_center(expr_filtered, meta_batch)
+        mode = "fallback_center"
+
 
     # 7) PCA
     Xc = safe_matrix_for_pca(zscore_rows(expr_harmonized), topk=topk)
@@ -619,3 +633,4 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
