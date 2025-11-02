@@ -409,19 +409,52 @@ def nonlinear_embedding_plots(Xc, meta, figdir, harmonization_mode, make=True):
 
 # ---------------- Outliers / Checks ----------------
 def detect_outliers(expr_log2: pd.DataFrame) -> pd.DataFrame:
-    X = expr_log2.T.fillna(0)
+    """
+    Robust outlier detection on samples.
+    - Works even if gene names are non-strings or duplicated.
+    - Handles small-n gracefully.
+    """
+    # shape: samples x genes
+    X = (expr_log2.T
+         .replace([np.inf, -np.inf], np.nan)
+         .fillna(0.0))
+
+    # Ensure consistent dtypes & avoid sklearn feature-name checks by using ndarray
+    X_np = X.to_numpy(dtype=float)
+
+    # Not enough samples?
+    n_samples = X_np.shape[0]
+    if n_samples == 0:
+        return pd.DataFrame(columns=["IsolationForest", "LOF"])
+    if n_samples == 1:
+        return pd.DataFrame({"IsolationForest": [0], "LOF": [0]}, index=expr_log2.columns[:1])
+
     scaler = StandardScaler(with_mean=True, with_std=True)
-    Xs = scaler.fit_transform(X)
+    Xs = scaler.fit_transform(X_np)
+
+    # Isolation Forest
     iso = IsolationForest(contamination="auto", random_state=42)
     iso_flag = iso.fit_predict(Xs)
+
+    # LOF (choose a valid neighbor count)
     try:
-        n_samples = len(Xs)
         n_neighbors = max(2, min(20, n_samples - 1))
-        lof_flag = LocalOutlierFactor(n_neighbors=n_neighbors).fit_predict(Xs) if n_samples>=3 else np.ones(n_samples)
+        if n_samples >= 3:
+            lof = LocalOutlierFactor(n_neighbors=n_neighbors)
+            lof_flag = lof.fit_predict(Xs)
+        else:
+            lof_flag = np.ones(n_samples)
     except Exception:
-        lof_flag = np.ones(len(Xs))
-    return pd.DataFrame({"IsolationForest": (iso_flag==-1).astype(int),
-                         "LOF": (lof_flag==-1).astype(int)}, index=expr_log2.columns)
+        lof_flag = np.ones(n_samples)
+
+    return pd.DataFrame(
+        {
+            "IsolationForest": (iso_flag == -1).astype(int),
+            "LOF":            (lof_flag == -1).astype(int),
+        },
+        index=expr_log2.columns
+    )
+
 
 # ---------------- Differential Expression ----------------
 def _bh_fdr(p: np.ndarray) -> np.ndarray:
@@ -633,4 +666,5 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
 
