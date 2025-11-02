@@ -1,7 +1,6 @@
 # app.py
 import os, io, tempfile, shutil
 import streamlit as st
-import pandas as pd
 from harmonizer import run_pipeline
 
 st.set_page_config(page_title="Multi-Modal Data Harmonization", layout="wide")
@@ -44,7 +43,6 @@ if run:
     meta_bytes = io.BytesIO(metadata_file.getvalue())
     gmt_path = None
     if gmt_file:
-        # stash GMT to a temp path
         tmpdir = tempfile.mkdtemp()
         gmt_path = os.path.join(tmpdir, gmt_file.name)
         with open(gmt_path, "wb") as fh: fh.write(gmt_file.getvalue())
@@ -53,9 +51,10 @@ if run:
         out = run_pipeline(
             group_to_file=groups,
             metadata_file=meta_bytes,
+            metadata_name_hint=metadata_file.name,   # <-- crucial for robust parsing
             metadata_id_cols=[c.strip() for c in id_cols.split(",") if c.strip()],
             metadata_batch_col=(batch_col.strip() or None),
-            out_root="out",  # created in working directory
+            out_root="out",
             pca_topk_features=5000,
             make_nonlinear=True,
             gsea_gmt=gmt_path,
