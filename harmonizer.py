@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # harmonizer.py
-# End-to-end pipeline: batch harmonization + QC + DE + GSEA (optional)
-import os, re, io, json, math, warnings, zipfile, tempfile, shutil
+# End-to-end pipeline: batch harmonization + QC + DE + optional GSEA
+import os, re, io, json, warnings, zipfile
 from typing import Dict, Tuple, List, Iterable, Optional
 import numpy as np
 import pandas as pd
@@ -105,7 +105,7 @@ def infer_batches(metadata: pd.DataFrame) -> pd.Series:
             s = md[col].astype(str); s.index = md.index; return s
     def guess_token(s):
         m = re.search(r"(FC\w+|L\d{3}|P\d+|\d{4}[-_]\d{2}[-_]\d{2}|\d{8})", s)
-        return m.group(0) if m else "B0"
+        return m and m.group(0) or "B0"
     return pd.Series([guess_token(x) for x in md.index.astype(str)], index=md.index, name="batch")
 
 def zscore_rows(M: pd.DataFrame) -> pd.DataFrame:
@@ -158,6 +158,67 @@ def detect_data_type_and_platform(X: pd.DataFrame) -> Tuple[str, str, Dict]:
     diags = {"zero_fraction": zero_frac, "value_range_approx": rng}
     return data_type, platform, diags
 
+# ---------- Robust metadata reader (BytesIO/paths; Excel/CSV/TSV) ----------
+def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFrame:
+    """
+    Robustly read metadata from path/BytesIO/bytes.
+    Uses name_hint (filename) when available; otherwise attempts Excel, then CSV/TSV.
+    """
+    is_pathlike = isinstance(metadata_obj, (str, os.PathLike))
+    suffix = (os.path.splitext(name_hint)[1].lower() if name_hint else
+              (os.path.splitext(str(metadata_obj))[1].lower() if is_pathlike else ""))
+
+    def _as_bytesio(x):
+        if isinstance(x, io.BytesIO):
+            x.seek(0); return x
+        if isinstance(x, bytes):
+            return io.BytesIO(x)
+        return None
+
+    def _try_excel_then_csv(buf_or_path):
+        try:
+            if isinstance(buf_or_path, (str, os.PathLike)):
+                return pd.read_excel(buf_or_path, engine="openpyxl")
+            else:
+                buf_or_path.seek(0)
+                return pd.read_excel(buf_or_path, engine="openpyxl")
+        except Exception:
+            try:
+                if isinstance(buf_or_path, (str, os.PathLike)):
+                    if str(buf_or_path).lower().endswith((".tsv", ".txt")):
+                        return pd.read_csv(buf_or_path, sep="\t")
+                    return pd.read_csv(buf_or_path, sep=None, engine="python")
+                else:
+                    buf_or_path.seek(0)
+                    return pd.read_csv(buf_or_path, sep=None, engine="python")
+            except Exception as e2:
+                raise ValueError(f"Could not parse metadata as Excel or text table: {e2}")
+
+    if suffix in (".xlsx", ".xls"):
+        if is_pathlike:
+            return pd.read_excel(metadata_obj, engine="openpyxl")
+        else:
+            bio = _as_bytesio(metadata_obj)
+            return pd.read_excel(bio, engine="openpyxl")
+    elif suffix in (".tsv", ".txt"):
+        if is_pathlike:
+            return pd.read_csv(metadata_obj, sep="\t")
+        else:
+            bio = _as_bytesio(metadata_obj); bio.seek(0)
+            return pd.read_csv(bio, sep="\t")
+    elif suffix == ".csv":
+        if is_pathlike:
+            return pd.read_csv(metadata_obj)
+        else:
+            bio = _as_bytesio(metadata_obj); bio.seek(0)
+            return pd.read_csv(bio)
+
+    if is_pathlike:
+        return _try_excel_then_csv(metadata_obj)
+    else:
+        bio = _as_bytesio(metadata_obj)
+        return _try_excel_then_csv(bio)
+
 # ---------------- Batch harmonization ----------------
 def _combat(expr_imputed: pd.DataFrame, meta_batch: pd.Series) -> Optional[pd.DataFrame]:
     if not _HAVE_SCANPY: return None
@@ -175,8 +236,9 @@ def _fallback_center(expr_imputed: pd.DataFrame, meta_batch: pd.Series) -> pd.Da
     X = expr_imputed.copy()
     grand_mean = X.values.mean()
     grand_std  = X.values.std()
-    for b in pd.unique(meta_batch.astype(str)):
-        cols = meta_batch.index[meta_batch.astype(str) == b]
+    b = meta_batch.astype(str)
+    for batch in pd.unique(b):
+        cols = b.index[b == batch]
         gmean = X[cols].values.mean()
         gstd  = X[cols].values.std()
         X[cols] = (X[cols] - gmean) * (grand_std / (gstd if gstd>0 else 1)) + grand_mean
@@ -384,6 +446,9 @@ def differential_expression(expr_log2: pd.DataFrame, meta: pd.DataFrame,
     for A, B in contrasts:
         A_cols = meta.index[meta["group"]==A]
         B_cols = meta.index[meta["group"]==B]
+        if len(A_cols) < 2 or len(B_cols) < 2:
+            # need at least 2 samples each for Welch's t-test
+            continue
         Xa = expr_log2[A_cols]; Xb = expr_log2[B_cols]
         ma = Xa.mean(axis=1); mb = Xb.mean(axis=1)
         log2fc = ma - mb
@@ -407,7 +472,6 @@ def gsea_from_ranks(rank_series: pd.Series, gmt_path: str, outdir: str) -> Optio
     rnk_df.to_csv(rnk_file, sep="\t", header=False)
     prer = gp.prerank(rnk=rnk_file, gene_sets=gmt_path, min_size=5, max_size=3000,
                       outdir=outdir, seed=42, processes=4, verbose=False)
-    # gseapy returns results in prer.res2d (if new) or prer.res2d/prer.res2d depending versions
     res = getattr(prer, "res2d", None)
     return res if isinstance(res, pd.DataFrame) else None
 
@@ -415,6 +479,7 @@ def gsea_from_ranks(rank_series: pd.Series, gmt_path: str, outdir: str) -> Optio
 def run_pipeline(
     group_to_file: Dict[str, io.BytesIO | str],
     metadata_file: io.BytesIO | str,
+    metadata_name_hint: str | None = None,   # <— NEW: pass filename to infer format
     metadata_id_cols: List[str] = ["Id","ID","id","CleanID","sample","Sample"],
     metadata_batch_col: Optional[str] = None,
     out_root: str = "out",
@@ -440,18 +505,9 @@ def run_pipeline(
     # 2) Build & align metadata
     meta_base = build_metadata(loaded)
     meta_base["bare_id"] = meta_base.index.str.split("__", n=1).str[-1]
-    # read metadata (tsv/csv/xlsx)
-    if isinstance(metadata_file, (str, os.PathLike)) and str(metadata_file).lower().endswith(".xlsx"):
-        m = pd.read_excel(metadata_file)
-    elif isinstance(metadata_file, (io.BytesIO, bytes)):
-        m = pd.read_excel(metadata_file)
-    else:
-        # assume TSV/CSV path or bytes
-        if isinstance(metadata_file, (io.BytesIO, bytes)):
-            m = pd.read_csv(metadata_file, sep="\t")
-        else:
-            sep = "\t" if str(metadata_file).lower().endswith((".tsv",".txt")) else ","
-            m = pd.read_csv(metadata_file, sep=sep)
+
+    # 2a) read metadata robustly (xlsx/tsv/csv; paths or bytes)
+    m = _read_metadata_any(metadata_file, name_hint=metadata_name_hint)
 
     id_col = next((c for c in metadata_id_cols if c in m.columns), None)
     if id_col is None:
@@ -491,7 +547,6 @@ def run_pipeline(
 
     # 5) Impute + variance filter
     expr_imputed = drop_zero_variance(row_mean_impute(expr_log2))
-    # mild variability filter (faster PCA; adjustable)
     gene_vars = expr_imputed.var(axis=1)
     pos = gene_vars[gene_vars > 0]
     topk = min(pca_topk_features, len(pos))
@@ -499,8 +554,9 @@ def run_pipeline(
 
     # 6) Batch collapsing + harmonization
     meta["batch_collapsed"] = smart_batch_collapse(meta, min_batch_size_for_combat)
-    expr_harmonized = _combat(expr_filtered, meta["batch_collapsed"]) or _fallback_center(expr_filtered, meta["batch_collapsed"])
-    mode = "ComBat" if _combat(expr_filtered, meta["batch_collapsed"]) is not None else "fallback_center"
+    x_combat = _combat(expr_filtered, meta["batch_collapsed"])
+    expr_harmonized = x_combat or _fallback_center(expr_filtered, meta["batch_collapsed"])
+    mode = "ComBat" if x_combat is not None else "fallback_center"
 
     # 7) PCA
     Xc = safe_matrix_for_pca(zscore_rows(expr_harmonized), topk=topk)
@@ -518,7 +574,7 @@ def run_pipeline(
 
     # 10) DE (group contrasts)
     groups = meta["group"].unique().tolist()
-    default_contrasts = [("Atypia","Normal"),("HPV_Pos","Normal"),("HPV_Neg","Normal")]
+    default_contrasts = [("Atypia","Normal"),("HPV_Pos","Normal"),("HPV_Neg","Normal"),("HPV_Pos","HPV_Neg")]
     contrasts = [(a,b) for (a,b) in default_contrasts if a in groups and b in groups]
     de = differential_expression(expr_log2, meta, contrasts)
     de_dir = os.path.join(OUTDIR, "de"); os.makedirs(de_dir, exist_ok=True)
@@ -529,22 +585,21 @@ def run_pipeline(
     gsea_dir = os.path.join(OUTDIR, "gsea"); os.makedirs(gsea_dir, exist_ok=True)
     if gsea_gmt and os.path.exists(gsea_gmt):
         for k, df in de.items():
-            ranks = df["t"]
-            ranks.index = df.index
+            ranks = df["t"]; ranks.index = df.index
             res = gsea_from_ranks(ranks, gsea_gmt, os.path.join(gsea_dir, k))
             if isinstance(res, pd.DataFrame):
                 res.to_csv(os.path.join(gsea_dir, f"GSEA_{k}.tsv"), sep="\t")
 
-    # 12) Save harmonized + pca tables
+    # 12) Save harmonized + PCA tables
     expr_harmonized.to_csv(os.path.join(OUTDIR, "expression_harmonized.tsv"), sep="\t")
     pca_df.to_csv(os.path.join(OUTDIR, "pca_scores.tsv"), sep="\t")
 
     # 13) Simple report
     rep = {
-        "qc": {"data_type": dtype, "platform": platform, "zero_fraction": float(diags.get("zero_fraction", np.nan)),
+        "qc": {"data_type": dtype, "platform": platform,
+               "zero_fraction": float(diags.get("zero_fraction", np.nan)),
                "harmonization_mode": mode},
-        "shapes": {"genes": int(combined_expr.shape[0]), "samples": int(combined_expr.shape[1])},
-        "figs": [os.path.relpath(p, OUTDIR) for p in figs]
+        "shapes": {"genes": int(combined_expr.shape[0]), "samples": int(combined_expr.shape[1])}
     }
     with open(os.path.join(OUTDIR, "report.json"), "w") as f:
         json.dump(rep, f, indent=2)
