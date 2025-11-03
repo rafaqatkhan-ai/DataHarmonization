@@ -14,10 +14,46 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .metric-card {padding: 0.75rem 1rem; border-radius: 1rem; border: 1px solid #eee; background: #fafafa;}
-    .smallcaps {font-variant: small-caps; color:#666;}
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { padding: 8px 16px; border-radius: 8px; background: #f5f5f7; }
+    /* Overall tab bar spacing */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px;
+    }
+
+    /* Default (unselected) tabs */
+    .stTabs [data-baseweb="tab"] {
+        padding: 10px 20px;
+        border-radius: 10px;
+        background: #e9f0fa; /* soft blue background */
+        color: #1e3a8a;       /* navy text */
+        font-weight: 600;
+        transition: all 0.25s ease-in-out;
+        border: 1px solid #cbd5e1;
+    }
+
+    /* Hover effect for tabs */
+    .stTabs [data-baseweb="tab"]:hover {
+        background: #cfe0ff;
+        color: #0a2540;
+        transform: translateY(-1px);
+        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+    }
+
+    /* Active (selected) tab */
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, #2563eb, #1e40af); /* deep blue gradient */
+        color: white !important;
+        border: none;
+        box-shadow: 0 2px 8px rgba(37,99,235,0.35);
+    }
+
+    /* Optional tweak for Streamlit default tabs container */
+    .stTabs [data-baseweb="tab-panel"] {
+        background: #ffffff;
+        border-radius: 10px;
+        padding: 1rem;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        margin-top: 8px;
+    }
     </style>
     """,
     unsafe_allow_html=True
@@ -315,4 +351,5 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
