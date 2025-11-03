@@ -10,6 +10,31 @@ st.set_page_config(
     page_icon="🧬",
     layout="wide",
 )
+st.markdown(
+    """
+    <style>
+    /* Set full background color */
+    [data-testid="stAppViewContainer"] {
+        background-color: #f3f4f6;  /* light gray */
+    }
+
+    /* Also color the sidebar (optional) */
+    [data-testid="stSidebar"] {
+        background-color: #e5e7eb;  /* slightly darker gray for contrast */
+    }
+
+    /* Make main content area stand out slightly */
+    [data-testid="stVerticalBlock"] {
+        background-color: #f9fafb;  /* almost white content cards */
+        border-radius: 12px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 # ---- Custom Centered Title with Subtitle ----
 st.markdown(
@@ -368,6 +393,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
