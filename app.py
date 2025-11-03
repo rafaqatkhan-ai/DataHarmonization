@@ -4,12 +4,33 @@ import streamlit as st
 import pandas as pd
 from harmonizer import run_pipeline
 
-st.set_page_config(page_title="Multi-Modal Data Harmonization", layout="wide")
+st.set_page_config(
+    page_title="🧬 Data Harmonization & QC Suite",
+    page_icon="🧬",
+    layout="wide",
+)
+
+# ---- Minimal theming polish
+st.markdown(
+    """
+    <style>
+    .metric-card {padding: 0.75rem 1rem; border-radius: 1rem; border: 1px solid #eee; background: #fafafa;}
+    .smallcaps {font-variant: small-caps; color:#666;}
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] { padding: 8px 16px; border-radius: 8px; background: #f5f5f7; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 st.title("🧬 Data Harmonization & QC Suite")
 st.caption("Upload expression data (single matrix OR one file per group) + metadata, then click **Run Harmonization**.")
 
-mode = st.radio("Expression upload mode", ["Single expression matrix", "Multiple files (one per group)"], horizontal=True)
+mode = st.radio(
+    "Expression upload mode",
+    ["Single expression matrix", "Multiple files (one per group)"],
+    horizontal=True
+)
 
 # ---------------- Expression upload ----------------
 single_expr_file = None
@@ -64,8 +85,7 @@ with st.expander("3) Optional: GSEA gene set (.gmt)"):
     gmt_file = st.file_uploader("Gene set GMT (optional)", type=["gmt"])
 
 # ---------------- Advanced ----------------
-advanced = st.expander("Advanced settings")
-with advanced:
+with st.expander("Advanced settings"):
     out_dir = st.text_input("Output directory", "out")
     pca_topk = st.number_input("Top variable genes for PCA", min_value=500, max_value=50000, value=5000, step=500)
     do_nonlinear = st.checkbox("Make UMAP/t-SNE (if available)", value=True)
@@ -120,45 +140,178 @@ if run:
             out = run_pipeline(**kwargs)
     except Exception as e:
         st.error(f"Run failed: {e}")
-        # If you need deeper diagnostics locally, uncomment the next line:
-        # st.exception(e)
         if gmt_file:
             shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
         st.stop()
 
     st.success("Done!")
 
-    # Show report + download
+    # ------- UI: Results Tabs -------
     st.subheader("Results")
+
+    # Load report for KPIs
+    report = {}
     try:
         with open(out["report_json"], "r") as fh:
-            st.json(json.load(fh))
+            report = json.load(fh)
     except Exception:
-        # Fallback to raw text if JSON parsing fails
-        with open(out["report_json"], "r") as fh:
-            st.code(fh.read(), language="json")
+        pass
 
-    # Figures preview (if any)
-    fig_dir = out["figdir"]
-    if os.path.isdir(fig_dir):
-        figs = [f for f in os.listdir(fig_dir) if f.lower().endswith((".png",".jpg",".jpeg"))]
-        if figs:
-            st.write("### Figures")
-            for f in sorted(figs):
-                st.image(os.path.join(fig_dir, f), caption=f, use_column_width=True)
+    kcol1, kcol2, kcol3, kcol4 = st.columns(4)
+    qc = report.get("qc", {})
+    shp = report.get("shapes", {})
+    with kcol1:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("Samples", shp.get("samples", "—"))
+        st.markdown('<div class="smallcaps">Total samples</div></div>', unsafe_allow_html=True)
+    with kcol2:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("Genes", shp.get("genes", "—"))
+        st.markdown('<div class="smallcaps">Features detected</div></div>', unsafe_allow_html=True)
+    with kcol3:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.metric("Zero fraction", f'{qc.get("zero_fraction", 0):.2f}')
+        st.markdown('<div class="smallcaps">Approx. sparsity</div></div>', unsafe_allow_html=True)
+    with kcol4:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        sil_batch = qc.get("silhouette_batch", None)
+        st.metric("Silhouette (batch)", f'{sil_batch:.2f}' if isinstance(sil_batch, (int,float)) else "—")
+        st.markdown('<div class="smallcaps">Lower is better</div></div>', unsafe_allow_html=True)
 
-    # Provide ZIP download
-    try:
-        with open(out["zip"], "rb") as fh:
-            st.download_button(
-                label="⬇️ Download all results (ZIP)",
-                data=fh.read(),
-                file_name="harmonization_results.zip",
-                mime="application/zip",
-                use_container_width=True,
-            )
-    except Exception as e:
-        st.warning(f"Could not open ZIP for download: {e}")
+    tabs = st.tabs(["Overview", "QC", "PCA & Embeddings", "DE & GSEA", "Outliers", "Files"])
 
+    # ---- Overview
+    with tabs[0]:
+        st.json(report if report else {"info":"report.json not found"})
+        # Show a few key figures if present
+        fig_dir = out["figdir"]
+        previews = [
+            "dist_pre_vs_post_log2.png",
+            "pca_clean_groups.png",
+            "enhanced_pca_analysis.png",
+        ]
+        show = [f for f in previews if os.path.exists(os.path.join(fig_dir, f))]
+        if show:
+            st.write("### Key Figures")
+            c1, c2, c3 = st.columns(3)
+            cols = [c1, c2, c3]
+            for i, f in enumerate(show):
+                with cols[i % 3]:
+                    st.image(os.path.join(fig_dir, f), caption=f, use_column_width=True)
+
+    # ---- QC
+    with tabs[1]:
+        fig_dir = out["figdir"]
+        qc_figs = [
+            "qc_library_size.png",
+            "qc_zero_rate_hist.png",
+            "group_density_post_log2.png",
+            "dist_zscore.png",
+            "sample_correlation_heatmap.png",
+            "hk_cv.png",
+            "sex_marker_concordance.png",
+        ]
+        st.write("### QC Figures")
+        for f in qc_figs:
+            p = os.path.join(fig_dir, f)
+            if os.path.exists(p):
+                st.image(p, caption=f, use_column_width=True)
+
+    # ---- PCA & Embeddings
+    with tabs[2]:
+        fig_dir = out["figdir"]
+        pcs = [
+            "pca_clean_groups.png",
+            "enhanced_pca_analysis.png",
+            "pca_loadings_pc1.png",
+            "pca_loadings_pc2.png",
+            "umap_by_group.png",
+            "tsne_by_group.png",
+        ]
+        st.write("### PCA / UMAP / t-SNE")
+        for f in pcs:
+            p = os.path.join(fig_dir, f)
+            if os.path.exists(p):
+                st.image(p, caption=f, use_column_width=True)
+
+    # ---- DE & GSEA
+    with tabs[3]:
+        fig_dir = out["figdir"]
+        de_dir = os.path.join(out["outdir"], "de")
+        de_files = [f for f in os.listdir(de_dir)] if os.path.isdir(de_dir) else []
+        # pick contrast
+        contrasts = [f.replace("DE_","").replace(".tsv","") for f in de_files if f.startswith("DE_")]
+        pick = st.selectbox("Select contrast", contrasts) if contrasts else None
+        if pick:
+            st.write(f"### Differential Expression: {pick}")
+            vol = os.path.join(fig_dir, f"volcano_{pick}.png")
+            ma = os.path.join(fig_dir, f"ma_{pick}.png")
+            hm = os.path.join(fig_dir, f"heatmap_top_50_{pick}.png")
+            for p in [vol, ma, hm]:
+                if os.path.exists(p):
+                    st.image(p, caption=os.path.basename(p), use_column_width=True)
+            # show table preview
+            tsv = os.path.join(de_dir, f"DE_{pick}.tsv")
+            try:
+                df = pd.read_csv(tsv, sep="\t", index_col=0).head(50)
+                st.dataframe(df, use_container_width=True)
+                with open(tsv, "rb") as fh:
+                    st.download_button("⬇️ Download full DE table", fh.read(), file_name=f"DE_{pick}.tsv", mime="text/tab-separated-values")
+            except Exception:
+                pass
+        # GSEA if any
+        gsea_dir = os.path.join(out["outdir"], "gsea")
+        if os.path.isdir(gsea_dir):
+            st.write("### GSEA Results")
+            for f in sorted(os.listdir(gsea_dir)):
+                if f.endswith(".tsv"):
+                    st.write(f)
+                    try:
+                        df = pd.read_csv(os.path.join(gsea_dir, f), sep="\t").head(30)
+                        st.dataframe(df, use_container_width=True)
+                    except Exception:
+                        pass)
+
+    # ---- Outliers
+    with tabs[4]:
+        try:
+            df = pd.read_csv(os.path.join(out["outdir"], "outliers.tsv"), sep="\t", index_col=0)
+            st.write("### Outlier flags (1 = outlier)")
+            st.dataframe(df, use_container_width=True)
+            with open(os.path.join(out["outdir"], "outliers.tsv"), "rb") as fh:
+                st.download_button("⬇️ Download outlier table", fh.read(), file_name="outliers.tsv", mime="text/tab-separated-values")
+        except Exception:
+            st.info("No outlier table found.")
+
+    # ---- Files
+    with tabs[5]:
+        colA, colB = st.columns(2)
+        with colA:
+            st.write("**Core Tables**")
+            core_files = [
+                ("Combined Expression", os.path.join(out["outdir"], "expression_combined.tsv")),
+                ("Harmonized Expression", os.path.join(out["outdir"], "expression_harmonized.tsv")),
+                ("PCA Scores", os.path.join(out["outdir"], "pca_scores.tsv")),
+                ("Metadata (aligned)", os.path.join(out["outdir"], "metadata.tsv")),
+                ("Report (JSON)", out["report_json"]),
+            ]
+            for label, path in core_files:
+                if os.path.exists(path):
+                    with open(path, "rb") as fh:
+                        st.download_button(f"⬇️ {label}", fh.read(), file_name=os.path.basename(path), mime="text/plain", use_container_width=True)
+        with colB:
+            try:
+                with open(out["zip"], "rb") as fh:
+                    st.download_button(
+                        label="⬇️ Download ALL results (ZIP)",
+                        data=fh.read(),
+                        file_name="harmonization_results.zip",
+                        mime="application/zip",
+                        use_container_width=True,
+                    )
+            except Exception as e:
+                st.warning(f"Could not open ZIP for download: {e}")
+
+    # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
