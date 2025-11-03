@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# harmonizer.py
+# harmonizer.py (generalized)
 # End-to-end pipeline: batch harmonization + QC + DE + optional GSEA
 import os, re, io, json, warnings, zipfile
 from typing import Dict, Tuple, List, Iterable, Optional
@@ -78,25 +78,110 @@ def normalize_batch_token(x: str) -> str:
     t = re.sub(r"[^A-Za-z0-9_]+", "", t)
     return t if t else np.nan
 
-def read_expression_xlsx(bytes_or_path, group_name: str) -> pd.DataFrame:
-    # bytes_or_path: str path or BytesIO
-    df = pd.read_excel(bytes_or_path, sheet_name=0, engine="openpyxl")
-    df = df.dropna(how="all").dropna(axis=1, how="all")
-    lower = [str(c).strip().lower() for c in df.columns]
-    for key in ["biomarkers","biomarker","marker","gene","feature","id","name"]:
-        if key in lower: biomarker_col = df.columns[lower.index(key)]; break
+# ---- File helpers ----
+
+def _as_bytesio(x):
+    if isinstance(x, io.BytesIO):
+        x.seek(0); return x
+    if isinstance(x, bytes):
+        return io.BytesIO(x)
+    return None
+
+
+def read_expression_any(bytes_or_path, name_hint: Optional[str] = None, group_name: Optional[str] = None,
+                        assume_first_col_is_gene: bool = True) -> pd.DataFrame:
+    """
+    Read an expression matrix from XLSX/CSV/TSV.
+    - Rows: genes/features; Columns: samples
+    - If group_name is provided, column names are prefixed with "{group}__" (for multi-file mode)
+    - If sheet has a dedicated gene column (detected by common names), it is used; otherwise first column is the index
+    """
+    # resolve suffix
+    is_pathlike = isinstance(bytes_or_path, (str, os.PathLike))
+    suffix = (os.path.splitext(name_hint)[1].lower() if name_hint else
+              (os.path.splitext(str(bytes_or_path))[1].lower() if is_pathlike else ""))
+
+    def _read_excel(x):
+        if is_pathlike:
+            df = pd.read_excel(x, sheet_name=0, engine="openpyxl")
+        else:
+            bio = _as_bytesio(x); bio.seek(0)
+            df = pd.read_excel(bio, sheet_name=0, engine="openpyxl")
+        return df
+
+    def _read_csv(x, sep=None):
+        if is_pathlike:
+            return pd.read_csv(x, sep=sep)
+        bio = _as_bytesio(x); bio.seek(0)
+        return pd.read_csv(bio, sep=sep)
+
+    # load
+    if suffix in (".xlsx", ".xls"):
+        df = _read_excel(bytes_or_path)
+    elif suffix in (".tsv", ".txt"):
+        df = _read_csv(bytes_or_path, sep="\t")
+    elif suffix == ".csv":
+        df = _read_csv(bytes_or_path, sep=None)
     else:
-        biomarker_col = df.columns[0]
-    df = df.rename(columns={biomarker_col: "Biomarker"}).set_index("Biomarker")
-    for c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
+        # try excel then csv autodetect
+        try:
+            df = _read_excel(bytes_or_path)
+        except Exception:
+            df = _read_csv(bytes_or_path, sep=None)
+
+    # clean
+    df = df.dropna(how="all").dropna(axis=1, how="all")
+    # try to find a gene/feature column
+    lower = [str(c).strip().lower() for c in df.columns]
+    gene_col = None
+    for key in ["biomarkers","biomarker","marker","gene","feature","id","name"]:
+        if key in lower:
+            gene_col = df.columns[lower.index(key)]
+            break
+    if gene_col is None:
+        if assume_first_col_is_gene:
+            gene_col = df.columns[0]
+        else:
+            raise ValueError("Could not infer gene/feature column in expression file.")
+
+    df = df.rename(columns={gene_col: "Biomarker"}).set_index("Biomarker")
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(axis=1, how="all")
-    df.columns = [f"{group_name}__{str(c).strip()}" for c in df.columns]
+
+    # optional prefix for multi-file mode
+    if group_name:
+        df.columns = [f"{group_name}__{str(c).strip()}" for c in df.columns]
+
+    # collapse duplicate gene rows by median
     return df.groupby(level=0).median(numeric_only=True)
 
-def build_metadata(loaded_dict: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-    return (pd.DataFrame(
-        [{"sample": s, "group": g} for g, df in loaded_dict.items() for s in df.columns]
-    ).set_index("sample").sort_index())
+
+def read_expression_xlsx(bytes_or_path, group_name: str) -> pd.DataFrame:
+    # kept for backward-compat; now uses the generalized reader
+    return read_expression_any(bytes_or_path, name_hint=str(bytes_or_path), group_name=group_name)
+
+
+def build_metadata_from_columns(columns: List[str], groups_from_prefix: bool = True) -> pd.DataFrame:
+    """
+    Build basic metadata from sample column names. If groups_from_prefix is True,
+    looks for the pattern "<group>__<sample>" and extracts group; otherwise sets group="ALL".
+    """
+    idx = pd.Index(columns, name="sample")
+    if groups_from_prefix and any("__" in c for c in columns):
+        df = pd.DataFrame({
+            "sample": idx,
+            "group": [c.split("__", 1)[0] if "__" in c else "Unknown" for c in columns],
+            "bare_id": [c.split("__", 1)[-1] for c in columns],
+        }).set_index("sample")
+    else:
+        df = pd.DataFrame({
+            "sample": idx,
+            "group": "ALL",
+            "bare_id": columns,
+        }).set_index("sample")
+    return df
+
 
 def infer_batches(metadata: pd.DataFrame) -> pd.Series:
     md = metadata.copy()
@@ -108,19 +193,23 @@ def infer_batches(metadata: pd.DataFrame) -> pd.Series:
         return m and m.group(0) or "B0"
     return pd.Series([guess_token(x) for x in md.index.astype(str)], index=md.index, name="batch")
 
+
 def zscore_rows(M: pd.DataFrame) -> pd.DataFrame:
     mu = M.mean(axis=1)
     sd = M.std(axis=1, ddof=1).replace(0, np.nan)
     return M.sub(mu, axis=0).div(sd, axis=0).replace([np.inf, -np.inf], np.nan).fillna(0)
 
+
 def row_mean_impute(X):  # per-gene
     X = X.apply(lambda r: r.fillna(r.mean()), axis=1)
     return X.fillna(0)
+
 
 def drop_zero_variance(X):
     var = X.var(axis=1, ddof=1).astype(float).fillna(0.0)
     nz = var > VAR_EPS
     return X.loc[nz]
+
 
 def safe_matrix_for_pca(matrix, topk: int = 5000):
     X = matrix.copy().apply(pd.to_numeric, errors="coerce").astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
@@ -135,6 +224,7 @@ def safe_matrix_for_pca(matrix, topk: int = 5000):
     X = X.T
     X.columns = X.columns.map(str)
     return X
+
 
 def detect_data_type_and_platform(X: pd.DataFrame) -> Tuple[str, str, Dict]:
     vals = X.values.ravel()
@@ -159,21 +249,16 @@ def detect_data_type_and_platform(X: pd.DataFrame) -> Tuple[str, str, Dict]:
     return data_type, platform, diags
 
 # ---------- Robust metadata reader (BytesIO/paths; Excel/CSV/TSV) ----------
+
 def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFrame:
     """
     Robustly read metadata from path/BytesIO/bytes.
     Uses name_hint (filename) when available; otherwise attempts Excel, then CSV/TSV.
+    Must contain a sample ID column (configurable in run_pipeline) and ideally a group column.
     """
     is_pathlike = isinstance(metadata_obj, (str, os.PathLike))
     suffix = (os.path.splitext(name_hint)[1].lower() if name_hint else
               (os.path.splitext(str(metadata_obj))[1].lower() if is_pathlike else ""))
-
-    def _as_bytesio(x):
-        if isinstance(x, io.BytesIO):
-            x.seek(0); return x
-        if isinstance(x, bytes):
-            return io.BytesIO(x)
-        return None
 
     def _try_excel_then_csv(buf_or_path):
         try:
@@ -220,6 +305,7 @@ def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFra
         return _try_excel_then_csv(bio)
 
 # ---------------- Batch harmonization ----------------
+
 def _combat(expr_imputed: pd.DataFrame, meta_batch: pd.Series) -> Optional[pd.DataFrame]:
     if not _HAVE_SCANPY: return None
     try:
@@ -232,6 +318,7 @@ def _combat(expr_imputed: pd.DataFrame, meta_batch: pd.Series) -> Optional[pd.Da
     except Exception:
         return None
 
+
 def _fallback_center(expr_imputed: pd.DataFrame, meta_batch: pd.Series) -> pd.DataFrame:
     X = expr_imputed.copy()
     grand_mean = X.values.mean()
@@ -243,6 +330,7 @@ def _fallback_center(expr_imputed: pd.DataFrame, meta_batch: pd.Series) -> pd.Da
         gstd  = X[cols].values.std()
         X[cols] = (X[cols] - gmean) * (grand_std / (gstd if gstd>0 else 1)) + grand_mean
     return X
+
 
 def smart_batch_collapse(meta: pd.DataFrame, min_size: int) -> pd.Series:
     b = meta['batch'].astype(str)
@@ -257,8 +345,10 @@ def smart_batch_collapse(meta: pd.DataFrame, min_size: int) -> pd.Series:
     return b.map(mapping)
 
 # ---------------- QC plots ----------------
+
 def _savefig(path: str):
     plt.savefig(path, dpi=300, bbox_inches="tight"); plt.close()
+
 
 def create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, figdir: str) -> List[str]:
     os.makedirs(figdir, exist_ok=True)
@@ -281,25 +371,29 @@ def create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, figdir: st
 
     # per-group densities
     plt.figure(figsize=(12,6))
-    for grp in ["Normal","Atypia","HPV_Pos","HPV_Neg"]:
+    groups_seen = list(pd.unique(meta["group"].astype(str)))
+    for grp in groups_seen:
         cols = meta.index[meta["group"]==grp]
         vals = expr_harmonized[cols].values.ravel() if len(cols) else np.array([])
         vals = vals[np.isfinite(vals)]
-        plt.hist(vals, bins=100, density=True, alpha=0.35, label=grp)
+        if len(vals):
+            plt.hist(vals, bins=100, density=True, alpha=0.35, label=grp)
     plt.title("Per-group Expression Distributions (log2, post-harmonization)")
     plt.xlabel("log2(Expression + 1)"); plt.ylabel("Density"); plt.legend()
     p = os.path.join(figdir, "group_density_post_log2.png"); _savefig(p); paths.append(p)
 
-    # boxplot
+    # boxplot (use labels=... for MPL compatibility)
     group_vals, labels = [], []
-    for grp in ["Atypia","HPV_Neg","HPV_Pos","Normal"]:
+    for grp in groups_seen:
         cols = meta.index[meta["group"]==grp]
         vals = expr_harmonized[cols].values.ravel() if len(cols) else np.array([])
         vals = vals[np.isfinite(vals)]
-        group_vals.append(vals); labels.append(grp)
-    plt.figure(figsize=(12,6)); plt.boxplot(group_vals, tick_labels=labels, showfliers=True)
-    plt.title("Expression Distribution After Harmonization (log2)"); plt.ylabel("log2(Expression + 1)")
-    p = os.path.join(figdir, "boxplot_groups_harmonized_log2.png"); _savefig(p); paths.append(p)
+        if len(vals):
+            group_vals.append(vals); labels.append(grp)
+    if group_vals:
+        plt.figure(figsize=(12,6)); plt.boxplot(group_vals, labels=labels, showfliers=True)
+        plt.title("Expression Distribution After Harmonization (log2)"); plt.ylabel("log2(Expression + 1)")
+        p = os.path.join(figdir, "boxplot_groups_harmonized_log2.png"); _savefig(p); paths.append(p)
 
     # sample correlation heatmap (guard huge matrices)
     if expr_harmonized.shape[1] <= 600:
@@ -310,23 +404,24 @@ def create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, figdir: st
         p = os.path.join(figdir, "sample_correlation_heatmap.png"); _savefig(p); paths.append(p)
     return paths
 
+
 def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization_mode):
-    groups = ['Normal','Atypia','HPV_Pos','HPV_Neg']
-    colors = ['#1f77b4','#ff7f0e','#2ca02c','#d62728']
+    groups = list(pd.unique(meta['group'].astype(str)))
+    # color cycle handled by mpl; keep it simple but consistent
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     # PC1 vs PC2 by group
     ax1 = axes[0,0]
-    for i,g in enumerate(groups):
+    for g in groups:
         sub = pca_df[pca_df["group"]==g]
         if sub.empty: continue
-        ax1.scatter(sub["PC1"], sub["PC2"], c=colors[i], s=50, alpha=0.7, label=f"{g} (n={len(sub)})", edgecolors='white', linewidth=0.5)
+        ax1.scatter(sub["PC1"], sub["PC2"], s=50, alpha=0.7, label=f"{g} (n={len(sub)})", edgecolors='white', linewidth=0.5)
         if len(sub) > 5:
             try:
                 cov = np.cov(sub[["PC1","PC2"]].T)
                 if np.linalg.det(cov) > 1e-10:
                     vals, vecs = np.linalg.eig(cov)
-                    vals = np.sqrt(vals)*2
-                    ell = Ellipse((sub["PC1"].mean(), sub["PC2"].mean()), vals[0], vals[1], angle=np.degrees(np.arctan2(vecs[1,0], vecs[0,0])), alpha=0.2, color=colors[i])
+                    vals = np.sqrt(np.maximum(vals, 0))*2
+                    ell = Ellipse((sub["PC1"].mean(), sub["PC2"].mean()), vals[0], vals[1], angle=np.degrees(np.arctan2(vecs[1,0], vecs[0,0])), alpha=0.2)
                     ax1.add_patch(ell)
             except Exception:
                 pass
@@ -334,6 +429,7 @@ def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization
     ax1.set_ylabel(f"PC2 ({pca_model.explained_variance_ratio_[1]*100:.1f}%)")
     ax1.set_title(f"PCA: Biological Groups\n({harmonization_mode} harmonization)")
     ax1.legend(); ax1.grid(True, alpha=0.3)
+
     # PC1 vs PC2 by batch
     ax2 = axes[0,1]
     batch_series = meta.loc[pca_df.index, "batch_collapsed"].astype(str)
@@ -345,22 +441,24 @@ def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization
     ax2.set_xlabel(ax1.get_xlabel()); ax2.set_ylabel(ax1.get_ylabel())
     ax2.set_title("PCA: Batch Effects (Top 8)"); ax2.legend(bbox_to_anchor=(1.05,1), loc='upper left', fontsize=9)
     ax2.grid(True, alpha=0.3)
+
     # PC3 vs PC4
     ax3 = axes[1,0]
-    for i,g in enumerate(groups):
+    for g in groups:
         sub = pca_df[pca_df["group"]==g]
         if not sub.empty:
-            ax3.scatter(sub["PC3"], sub["PC4"], c=colors[i], s=40, alpha=0.7, label=g)
+            ax3.scatter(sub["PC3"], sub["PC4"], s=40, alpha=0.7, label=g)
     ax3.set_xlabel(f"PC3 ({pca_model.explained_variance_ratio_[2]*100:.1f}%)")
     ax3.set_ylabel(f"PC4 ({pca_model.explained_variance_ratio_[3]*100:.1f}%)")
     ax3.set_title("Higher Components: PC3 vs PC4")
     ax3.legend(); ax3.grid(True, alpha=0.3)
+
     # Scree
     ax4 = axes[1,1]
     n = min(10, len(pca_model.explained_variance_ratio_))
     xs = np.arange(1,n+1); vals = pca_model.explained_variance_ratio_[:n]; cum = np.cumsum(vals)
     ax4.bar(xs, vals, alpha=0.7, label='Individual')
-    ax4.plot(xs, cum, 'ro-', linewidth=2, markersize=6, label='Cumulative')
+    ax4.plot(xs, cum, 'o-', linewidth=2, markersize=6, label='Cumulative')
     for i,v in enumerate(vals):
         ax4.text(i+1, v+0.01, f"{v*100:.1f}%", ha='center', va='bottom', fontsize=9)
     ax4.set_xlabel("Principal Components"); ax4.set_ylabel("Explained Variance Ratio")
@@ -370,16 +468,16 @@ def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization
 
     # Clean PC1/PC2 by group
     plt.figure(figsize=(10,8))
-    for i,g in enumerate(groups):
+    for g in groups:
         sub = pca_df[pca_df["group"]==g]
         if not sub.empty:
-            plt.scatter(sub["PC1"], sub["PC2"], c=colors[i], s=60, alpha=0.85,
-                        edgecolors='black', linewidth=0.5, label=f"{g} (n={len(sub)})")
+            plt.scatter(sub["PC1"], sub["PC2"], s=60, alpha=0.85, edgecolors='black', linewidth=0.5, label=f"{g} (n={len(sub)})")
     plt.xlabel(f"PC1 ({pca_model.explained_variance_ratio_[0]*100:.1f}%)")
     plt.ylabel(f"PC2 ({pca_model.explained_variance_ratio_[1]*100:.1f}%)")
-    plt.title(f"PCA: Cervical Cancer Sample Groups\n({harmonization_mode} harmonization)")
+    plt.title(f"PCA: Sample Groups\n({harmonization_mode} harmonization)")
     plt.legend(fontsize=11); plt.grid(True, alpha=0.3); plt.tight_layout()
     _savefig(os.path.join(output_dir, "pca_clean_groups.png"))
+
 
 def nonlinear_embedding_plots(Xc, meta, figdir, harmonization_mode, make=True):
     if not make: return
@@ -401,13 +499,14 @@ def nonlinear_embedding_plots(Xc, meta, figdir, harmonization_mode, make=True):
     if Emb is None: return
     emb_df = pd.DataFrame(Emb, index=Xc.index, columns=["E1","E2"]).join(meta)
     plt.figure(figsize=(9,7))
-    for grp in ["Normal","Atypia","HPV_Pos","HPV_Neg"]:
+    for grp in pd.unique(emb_df["group"].astype(str)):
         sub = emb_df[emb_df["group"]==grp]
         if not sub.empty: plt.scatter(sub["E1"], sub["E2"], s=25, label=f"{grp} (n={len(sub)})")
     plt.title(f"{name.upper()} on ~{n_embed} PCs ({harmonization_mode})"); plt.legend(frameon=False)
     _savefig(os.path.join(figdir, f"{name}_by_group.png"))
 
 # ---------------- Outliers / Checks ----------------
+
 def detect_outliers(expr_log2: pd.DataFrame) -> pd.DataFrame:
     """
     Robust outlier detection on samples.
@@ -457,6 +556,7 @@ def detect_outliers(expr_log2: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------- Differential Expression ----------------
+
 def _bh_fdr(p: np.ndarray) -> np.ndarray:
     p = np.asarray(p, float)
     n = p.size
@@ -467,6 +567,7 @@ def _bh_fdr(p: np.ndarray) -> np.ndarray:
     q = np.clip(q, 0, 1)
     out = np.empty_like(q); out[order] = q
     return out
+
 
 def differential_expression(expr_log2: pd.DataFrame, meta: pd.DataFrame,
                             contrasts: Iterable[Tuple[str, str]]) -> Dict[str, pd.DataFrame]:
@@ -493,6 +594,7 @@ def differential_expression(expr_log2: pd.DataFrame, meta: pd.DataFrame,
     return res
 
 # ---------------- GSEA (optional) ----------------
+
 def gsea_from_ranks(rank_series: pd.Series, gmt_path: str, outdir: str) -> Optional[pd.DataFrame]:
     """
     rank_series: pd.Series where index=gene, values=ranking score (e.g., t or log2FC)
@@ -509,11 +611,15 @@ def gsea_from_ranks(rank_series: pd.Series, gmt_path: str, outdir: str) -> Optio
     return res if isinstance(res, pd.DataFrame) else None
 
 # ---------------- The main orchestrator ----------------
+
 def run_pipeline(
-    group_to_file: Dict[str, io.BytesIO | str],
-    metadata_file: io.BytesIO | str,
-    metadata_name_hint: str | None = None,   # <— NEW: pass filename to infer format
+    group_to_file: Optional[Dict[str, io.BytesIO | str]] = None,
+    single_expression_file: Optional[io.BytesIO | str] = None,
+    single_expression_name_hint: Optional[str] = None,
+    metadata_file: io.BytesIO | str = None,
+    metadata_name_hint: str | None = None,   # pass filename to infer format
     metadata_id_cols: List[str] = ["Id","ID","id","CleanID","sample","Sample"],
+    metadata_group_cols: List[str] = ["group","Group","condition","Condition","phenotype","Phenotype"],
     metadata_batch_col: Optional[str] = None,
     out_root: str = "out",
     fig_subdir: str = "figs",
@@ -523,29 +629,44 @@ def run_pipeline(
     gsea_gmt: Optional[str] = None,  # optional path to .gmt
 ) -> Dict[str, str]:
     """
+    Generalized pipeline.
+    Modes:
+      - Multi-file: group_to_file={group: file-like/path, ...}
+      - Single-file: single_expression_file=matrix (columns=samples), groups read from metadata if present
     Returns dict with paths to key outputs and a ZIP file consolidating everything.
     """
+    if metadata_file is None:
+        raise ValueError("metadata_file is required.")
+
     OUTDIR = os.path.join(out_root)
     FIGDIR = os.path.join(OUTDIR, fig_subdir)
     REPORT_DIR = os.path.join(OUTDIR, "report")
     os.makedirs(FIGDIR, exist_ok=True); os.makedirs(REPORT_DIR, exist_ok=True)
 
     # 1) Load expression
-    loaded = {g: read_expression_xlsx(f, g) for g, f in group_to_file.items()}
-    combined_expr = pd.concat([loaded[g] for g in loaded.keys()], axis=1, join="outer")
-    combined_expr = combined_expr.replace([np.inf,-np.inf], np.nan)
+    if single_expression_file is not None:
+        expr = read_expression_any(single_expression_file, name_hint=single_expression_name_hint, group_name=None)
+        combined_expr = expr
+        meta_base = build_metadata_from_columns(list(combined_expr.columns), groups_from_prefix=False)
+    else:
+        if not group_to_file or len(group_to_file) == 0:
+            raise ValueError("Provide at least one expression file (single or multi).")
+        loaded = {g: read_expression_any(f, name_hint=str(f), group_name=g) for g, f in group_to_file.items()}
+        combined_expr = pd.concat([loaded[g] for g in loaded.keys()], axis=1, join="outer")
+        combined_expr = combined_expr.replace([np.inf,-np.inf], np.nan)
+        meta_base = build_metadata_from_columns(list(combined_expr.columns), groups_from_prefix=True)
 
-    # 2) Build & align metadata
-    meta_base = build_metadata(loaded)
-    meta_base["bare_id"] = meta_base.index.str.split("__", n=1).str[-1]
-
-    # 2a) read metadata robustly (xlsx/tsv/csv; paths or bytes)
+    # 2) Read & align metadata
     m = _read_metadata_any(metadata_file, name_hint=metadata_name_hint)
 
     id_col = next((c for c in metadata_id_cols if c in m.columns), None)
     if id_col is None:
         raise ValueError(f"Could not find an ID column among {metadata_id_cols} in metadata: {list(m.columns)}")
 
+    # group column (optional)
+    group_col = next((c for c in metadata_group_cols if c in m.columns), None)
+
+    # batch column (optional detection)
     if metadata_batch_col is None:
         if "Batch" in m.columns: metadata_batch_col = "Batch"
         elif "batch" in m.columns: metadata_batch_col = "batch"
@@ -554,16 +675,29 @@ def run_pipeline(
             metadata_batch_col = batch_like[0] if batch_like else None
 
     m_align = m.set_index(id_col)
-    meta = meta_base.join(m_align, on="bare_id", how="left", rsuffix="_ext")
-    if metadata_batch_col is not None and metadata_batch_col in meta.columns:
-        meta["batch_external_raw"] = meta[metadata_batch_col]
-        meta["batch_external"] = meta[metadata_batch_col].map(normalize_batch_token)
-        meta["batch"] = meta["batch_external"].where(meta["batch_external"].notna(), infer_batches(meta_base))
+
+    # for single-file mode, meta_base.bare_id is the column name; for multi-file it's the suffix after "__"
+    meta = meta_base.copy()
+    # If group labels exist in metadata, map them in
+    if group_col is not None:
+        meta["group_external"] = m_align[group_col].reindex(meta["bare_id"]).values
+        meta["group"] = meta["group_external"].where(meta["group_external"].notna(), meta["group"])
+
+    if metadata_batch_col is not None and metadata_batch_col in m_align.columns:
+        meta["batch_external_raw"] = m_align[metadata_batch_col].reindex(meta["bare_id"]).values
+        meta["batch_external"] = pd.Series(meta["batch_external_raw"], index=meta.index).map(normalize_batch_token)
+        # fallback to inference
+        inferred = infer_batches(meta)
+        meta["batch"] = meta["batch_external"].where(meta["batch_external"].notna(), inferred)
     else:
-        meta["batch"] = infer_batches(meta_base)
+        meta["batch"] = infer_batches(meta)
+
+    # keep common columns if present
     keep = ["group","batch"]
     for extra in ("Age","age","Sex","sex","Gender","gender"):
-        if extra in meta.columns: keep.append(extra)
+        if extra in m_align.columns:
+            meta[extra] = m_align[extra].reindex(meta["bare_id"]).values
+            keep.append(extra)
     meta = meta[keep]
 
     # Save inputs
@@ -586,16 +720,11 @@ def run_pipeline(
     expr_filtered = expr_imputed.loc[pos.nlargest(topk).index]
 
     # 6) Batch collapsing + harmonization
-    # 6) Batch collapsing + harmonization  (fixed)
     meta["batch_collapsed"] = smart_batch_collapse(meta, min_batch_size_for_combat)
-    
-    # Make sure batch labels are aligned to the expression matrix columns
     meta_batch = meta["batch_collapsed"].reindex(expr_filtered.columns)
     if meta_batch.isna().any():
-        # If any sample is missing a batch (shouldn't happen), backfill with its raw group tag
         meta_batch = meta_batch.fillna(meta["group"].reindex(expr_filtered.columns).astype(str))
 
-    # Try ComBat; if it returns None, fall back deterministically
     x_combat = _combat(expr_filtered, meta_batch)
     if x_combat is not None:
         expr_harmonized = x_combat
@@ -604,12 +733,11 @@ def run_pipeline(
         expr_harmonized = _fallback_center(expr_filtered, meta_batch)
         mode = "fallback_center"
 
-
     # 7) PCA
     Xc = safe_matrix_for_pca(zscore_rows(expr_harmonized), topk=topk)
-    pca = PCA(n_components=6, random_state=42).fit(Xc)
+    pca = PCA(n_components=min(6, Xc.shape[1]), random_state=42).fit(Xc)
     Xp = pca.transform(Xc)
-    pca_df = pd.DataFrame(Xp[:, :6], columns=[f"PC{i+1}" for i in range(6)], index=Xc.index).join(meta)
+    pca_df = pd.DataFrame(Xp[:, :min(6, Xp.shape[1])], columns=[f"PC{i+1}" for i in range(min(6, Xp.shape[1]))], index=Xc.index).join(meta)
 
     # 8) Figures
     figs = create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, FIGDIR)
@@ -620,10 +748,11 @@ def run_pipeline(
     outliers = detect_outliers(expr_log2); outliers.to_csv(os.path.join(OUTDIR, "outliers.tsv"), sep="\t")
 
     # 10) DE (group contrasts)
-    groups = meta["group"].unique().tolist()
-    default_contrasts = [("Atypia","Normal"),("HPV_Pos","Normal"),("HPV_Neg","Normal"),("HPV_Pos","HPV_Neg")]
-    contrasts = [(a,b) for (a,b) in default_contrasts if a in groups and b in groups]
-    de = differential_expression(expr_log2, meta, contrasts)
+    groups = [g for g in pd.unique(meta["group"].astype(str)) if g and g == g]
+    default_contrasts = [(a,b) for a in groups for b in groups if a!=b]
+    # Filter to a few sensible contrasts (against ALL doesn't make sense)
+    default_contrasts = [c for c in default_contrasts if not ("ALL" in c)]
+    de = differential_expression(expr_log2, meta, default_contrasts)
     de_dir = os.path.join(OUTDIR, "de"); os.makedirs(de_dir, exist_ok=True)
     for k, df in de.items():
         df.to_csv(os.path.join(de_dir, f"DE_{k}.tsv"), sep="\t")
@@ -666,5 +795,3 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
-
-
