@@ -16,18 +16,33 @@ st.markdown(
     """
     <style>
     .centered-title {
-        font-size: 2.4rem;
-        font-weight: 800;
+        font-size: 2.6rem;
+        font-weight: 900;
         text-align: center;
-        color: #1e40af;
-        margin-top: -0.5rem;
-        background: linear-gradient(90deg, #2563eb, #1e3a8a);
+        background: linear-gradient(90deg, #1e3a8a, #2563eb, #6366f1, #7c3aed);
+        background-size: 300% 300%;
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
+        animation: colorShift 8s ease infinite;
+        margin-top: -0.5rem;
     }
+
+    @keyframes colorShift {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+
     .centered-title span {
         font-size: 2.8rem;
+        animation: pulse 2s infinite alternate;
     }
+
+    @keyframes pulse {
+        from { transform: scale(1); opacity: 0.85; }
+        to { transform: scale(1.2); opacity: 1; }
+    }
+
     .subtitle {
         text-align: center;
         color: #475569;
@@ -35,12 +50,12 @@ st.markdown(
         margin-top: -0.6rem;
         font-style: italic;
     }
+
     @media (prefers-color-scheme: dark) {
         .centered-title {
-            color: #93c5fd;
-            background: linear-gradient(90deg, #06b6d4, #6366f1);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            background: linear-gradient(90deg, #06b6d4, #3b82f6, #8b5cf6, #ec4899);
+            background-size: 300% 300%;
+            animation: colorShift 8s ease infinite;
         }
         .subtitle {
             color: #cbd5e1;
@@ -353,6 +368,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
