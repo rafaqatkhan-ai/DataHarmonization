@@ -10,6 +10,8 @@ st.set_page_config(
     page_icon="🧬",
     layout="wide",
 )
+
+# ---- Global Theme (Dark Grey) + Attractive Tabs + KPI Cards ----
 st.markdown(
     """
     <style>
@@ -18,17 +20,14 @@ st.markdown(
         background-color: #1e1e1e;  /* main dark grey */
         color: #e5e7eb;
     }
-
     [data-testid="stSidebar"] {
         background-color: #2a2a2a;
         color: #f3f3f3;
         border-right: 1px solid #3a3a3a;
     }
-
     [data-testid="stHeader"] {
         background-color: transparent;
     }
-
     [data-testid="stVerticalBlock"] {
         background-color: #252525;
         border-radius: 12px;
@@ -62,35 +61,28 @@ st.markdown(
     .stTabs [data-baseweb="tab-list"] {
         gap: 10px;
     }
-
-    /* Default tabs */
     .stTabs [data-baseweb="tab"] {
         padding: 10px 20px;
         border-radius: 10px;
         background: #2d2d2d;  /* dark neutral */
         color: #cbd5e1;       /* slate-300 text */
-        font-weight: 600;
+        font-weight: 700;
         transition: all 0.25s ease-in-out;
         border: 1px solid #3b3b3b;
     }
-
-    /* Hover effect */
     .stTabs [data-baseweb="tab"]:hover {
         background: #383838;
         color: #f8fafc;
         transform: translateY(-1px);
         box-shadow: 0 2px 6px rgba(0,0,0,0.25);
     }
-
-    /* Active tab */
     .stTabs [aria-selected="true"] {
         background: linear-gradient(135deg, #06b6d4, #3b82f6, #6366f1);
         color: #0b1020 !important;
         border: none;
         box-shadow: 0 4px 12px rgba(6,182,212,0.35);
+        transform: translateY(-1px);
     }
-
-    /* Panel under tabs */
     .stTabs [data-baseweb="tab-panel"] {
         background: #1e1e1e;
         border-radius: 10px;
@@ -98,41 +90,24 @@ st.markdown(
         box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
         margin-top: 8px;
     }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
 
-st.markdown(
-    """
-    <style>
-    /* Set full background color */
-    [data-testid="stAppViewContainer"] {
-        background-color: #f3f4f6;  /* light gray */
-    }
-
-    /* Also color the sidebar (optional) */
-    [data-testid="stSidebar"] {
-        background-color: #e5e7eb;  /* slightly darker gray for contrast */
-    }
-
-    /* Make main content area stand out slightly */
-    [data-testid="stVerticalBlock"] {
-        background-color: #f9fafb;  /* almost white content cards */
+    /* KPI metric cards */
+    .metric-card {
+        background: #1f2937; /* slate-800 */
         border-radius: 12px;
-        padding: 1rem;
-        margin-bottom: 1rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        padding: 14px 16px;
+        margin-bottom: 12px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+        border: 1px solid rgba(255,255,255,0.06);
     }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+    .smallcaps {
+        font-variant: all-small-caps;
+        letter-spacing: 0.04em;
+        color: #a3a3a3;
+        margin-top: -6px;
+    }
 
-# ---- Custom Centered Title with Subtitle ----
-st.markdown(
-    """
-    <style>
+    /* Title + subtitle styling (animated gradient text) */
     .centered-title {
         font-size: 2.6rem;
         font-weight: 900;
@@ -144,43 +119,34 @@ st.markdown(
         animation: colorShift 8s ease infinite;
         margin-top: -0.5rem;
     }
-
     @keyframes colorShift {
         0% { background-position: 0% 50%; }
         50% { background-position: 100% 50%; }
         100% { background-position: 0% 50%; }
     }
-
     .centered-title span {
         font-size: 2.8rem;
         animation: pulse 2s infinite alternate;
     }
-
     @keyframes pulse {
         from { transform: scale(1); opacity: 0.85; }
         to { transform: scale(1.2); opacity: 1; }
     }
-
     .subtitle {
         text-align: center;
-        color: #475569;
+        color: #cbd5e1;
         font-size: 1rem;
         margin-top: -0.6rem;
         font-style: italic;
     }
-
-    @media (prefers-color-scheme: dark) {
-        .centered-title {
-            background: linear-gradient(90deg, #06b6d4, #3b82f6, #8b5cf6, #ec4899);
-            background-size: 300% 300%;
-            animation: colorShift 8s ease infinite;
-        }
-        .subtitle {
-            color: #cbd5e1;
-        }
-    }
     </style>
+    """,
+    unsafe_allow_html=True
+)
 
+# ---- Custom Centered Title with Subtitle ----
+st.markdown(
+    """
     <h1 class="centered-title">
         <span>🧬</span> Data Harmonization & QC Suite <span>🧬</span>
     </h1>
@@ -486,16 +452,3 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
-
-
-
-
-
-
-
-
-
-
-
-
-
