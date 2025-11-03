@@ -5,7 +5,7 @@ import pandas as pd
 from harmonizer import run_pipeline
 
 st.set_page_config(
-    page_title="🧬 Data Harmonization & QC Suite",
+    #page_title="🧬 Data Harmonization & QC Suite",
     page_icon="🧬",
     layout="wide",
 )
@@ -348,6 +348,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
