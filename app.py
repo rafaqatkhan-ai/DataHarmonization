@@ -13,84 +13,6 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* ---------- Dark Grey Background Theme ---------- */
-    [data-testid="stAppViewContainer"] {
-        background-color: #1e1e1e;  /* dark grey main background */
-        color: #e5e5e5;             /* light grey text for readability */
-    }
-
-    [data-testid="stSidebar"] {
-        background-color: #2a2a2a;  /* slightly lighter sidebar */
-        color: #f3f3f3;
-        border-right: 1px solid #3a3a3a;
-    }
-
-    [data-testid="stHeader"] {
-        background-color: transparent;  /* make header transparent */
-    }
-
-    [data-testid="stVerticalBlock"] {
-        background-color: #252525;  /* card-like blocks */
-        border-radius: 12px;
-        padding: 1rem;
-        margin-bottom: 1rem;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
-    }
-
-    /* Adjust Streamlit default text colors for dark background */
-    h1, h2, h3, h4, h5, h6, p, label, span {
-        color: #e5e7eb !important;
-    }
-
-    /* Make buttons pop */
-    .stButton>button {
-        background: linear-gradient(90deg, #2563eb, #1d4ed8);
-        color: white;
-        border-radius: 8px;
-        border: none;
-        padding: 0.5rem 1rem;
-        font-weight: 600;
-        transition: all 0.3s ease-in-out;
-    }
-    .stButton>button:hover {
-        background: linear-gradient(90deg, #3b82f6, #2563eb);
-        transform: translateY(-2px);
-        box-shadow: 0 4px 10px rgba(37, 99, 235, 0.4);
-    }
-
-    /* Tabs contrast nicely against dark background */
-    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
-    .stTabs [data-baseweb="tab"] {
-        background: #2a2a2a;
-        color: #cbd5e1;
-        border-radius: 10px;
-        border: 1px solid #3b3b3b;
-        font-weight: 600;
-    }
-    .stTabs [data-baseweb="tab"]:hover {
-        background: #383838;
-        color: #f1f5f9;
-    }
-    .stTabs [aria-selected="true"] {
-        background: linear-gradient(135deg, #06b6d4, #6366f1);
-        color: #0b1020 !important;
-        box-shadow: 0 4px 12px rgba(6,182,212,0.35);
-        border: none;
-    }
-    .stTabs [data-baseweb="tab-panel"] {
-        background: #1e1e1e;
-        border-radius: 10px;
-        padding: 1rem;
-        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    """
-    <style>
     /* Set full background color */
     [data-testid="stAppViewContainer"] {
         background-color: #f3f4f6;  /* light gray */
@@ -471,6 +393,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
