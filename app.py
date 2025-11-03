@@ -270,7 +270,7 @@ if run:
                         df = pd.read_csv(os.path.join(gsea_dir, f), sep="\t").head(30)
                         st.dataframe(df, use_container_width=True)
                     except Exception:
-                        pass)
+                        pass
 
     # ---- Outliers
     with tabs[4]:
@@ -315,3 +315,4 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
