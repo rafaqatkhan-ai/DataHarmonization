@@ -10,6 +10,90 @@ st.set_page_config(
     page_icon="🧬",
     layout="wide",
 )
+# ---- Theme selector (non-black options) ----
+theme = st.selectbox(
+    "Theme",
+    ["Light Gray", "Soft Off-White", "Deep Navy", "Slate Blue"],
+    index=0,
+    help="Pick a background style for the app."
+)
+
+def apply_theme(t: str):
+    if t == "Light Gray":
+        css = """
+        <style>
+        [data-testid="stAppViewContainer"] { background:#f3f4f6; color:#0f172a; }
+        [data-testid="stSidebar"] { background:#e5e7eb; border-right:1px solid #cbd5e1; }
+        [data-testid="stVerticalBlock"] { background:#ffffff; border-radius:12px; padding:1rem; margin-bottom:1rem; box-shadow:0 2px 8px rgba(15,23,42,0.06); }
+        h1,h2,h3,h4,h5,h6,p,label,span { color:#0f172a !important; }
+        .stButton>button { background:linear-gradient(90deg,#2563eb,#1d4ed8); color:#fff; border:none; border-radius:8px; padding:.5rem 1rem; font-weight:600; }
+        .stButton>button:hover { background:linear-gradient(90deg,#3b82f6,#2563eb); transform:translateY(-2px); box-shadow:0 4px 10px rgba(37,99,235,.25); }
+        .stTabs [data-baseweb="tab-list"]{ gap:10px; }
+        .stTabs [data-baseweb="tab"]{ background:#e9f0fa; color:#1e3a8a; border:1px solid #cbd5e1; border-radius:10px; font-weight:700; }
+        .stTabs [data-baseweb="tab"]:hover{ background:#dbeafe; color:#0a2540; }
+        .stTabs [aria-selected="true"]{ background:linear-gradient(135deg,#2563eb,#1e40af); color:#fff !important; box-shadow:0 4px 10px rgba(37,99,235,.25); border:none; }
+        .stTabs [data-baseweb="tab-panel"]{ background:#ffffff; border-radius:10px; padding:1rem; box-shadow:0 2px 8px rgba(15,23,42,.05); }
+        .metric-card{ background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:14px 16px; }
+        .smallcaps{ color:#475569; }
+        </style>
+        """
+    elif t == "Soft Off-White":
+        css = """
+        <style>
+        [data-testid="stAppViewContainer"] { background:#faf7f2; color:#1f2937; }
+        [data-testid="stSidebar"] { background:#f3efe8; border-right:1px solid #e5e7eb; }
+        [data-testid="stVerticalBlock"] { background:#ffffff; border-radius:12px; padding:1rem; margin-bottom:1rem; box-shadow:0 2px 10px rgba(0,0,0,0.06); }
+        h1,h2,h3,h4,h5,h6,p,label,span { color:#111827 !important; }
+        .stButton>button { background:linear-gradient(90deg,#10b981,#059669); color:#fff; border:none; border-radius:8px; padding:.5rem 1rem; font-weight:600; }
+        .stButton>button:hover { background:linear-gradient(90deg,#34d399,#10b981); transform:translateY(-2px); box-shadow:0 4px 10px rgba(16,185,129,.25); }
+        .stTabs [data-baseweb="tab-list"]{ gap:10px; }
+        .stTabs [data-baseweb="tab"]{ background:#fff7ed; color:#7c2d12; border:1px solid #fed7aa; border-radius:10px; font-weight:700; }
+        .stTabs [data-baseweb="tab"]:hover{ background:#ffedd5; color:#4a1d0a; }
+        .stTabs [aria-selected="true"]{ background:linear-gradient(135deg,#f97316,#ef4444); color:#fff !important; border:none; box-shadow:0 4px 12px rgba(249,115,22,.25); }
+        .stTabs [data-baseweb="tab-panel"]{ background:#ffffff; border-radius:10px; padding:1rem; box-shadow:0 2px 8px rgba(0,0,0,.05); }
+        .metric-card{ background:#ffffff; border:1px solid #f3f4f6; border-radius:12px; padding:14px 16px; }
+        .smallcaps{ color:#6b7280; }
+        </style>
+        """
+    elif t == "Deep Navy":
+        css = """
+        <style>
+        [data-testid="stAppViewContainer"] { background:#0b1020; color:#e5e7eb; }
+        [data-testid="stSidebar"] { background:#0f172a; color:#f3f4f6; border-right:1px solid #1f2a44; }
+        [data-testid="stVerticalBlock"] { background:#0d142a; border-radius:12px; padding:1rem; margin-bottom:1rem; box-shadow:0 2px 12px rgba(0,0,0,.5); }
+        h1,h2,h3,h4,h5,h6,p,label,span { color:#e5e7eb !important; }
+        .stButton>button { background:linear-gradient(90deg,#06b6d4,#3b82f6); color:#0b1020; border:none; border-radius:8px; padding:.5rem 1rem; font-weight:700; }
+        .stButton>button:hover { background:linear-gradient(90deg,#22d3ee,#60a5fa); transform:translateY(-2px); box-shadow:0 4px 12px rgba(34,211,238,.35); }
+        .stTabs [data-baseweb="tab-list"]{ gap:10px; }
+        .stTabs [data-baseweb="tab"]{ background:#111827; color:#cbd5e1; border:1px solid #1f2937; border-radius:10px; font-weight:700; }
+        .stTabs [data-baseweb="tab"]:hover{ background:#0b1220; color:#f1f5f9; }
+        .stTabs [aria-selected="true"]{ background:linear-gradient(135deg,#06b6d4,#6366f1); color:#0b1020 !important; border:none; box-shadow:0 4px 12px rgba(6,182,212,.35); }
+        .stTabs [data-baseweb="tab-panel"]{ background:#0b1020; border-radius:10px; padding:1rem; box-shadow:inset 0 0 0 1px rgba(99,102,241,.15); }
+        .metric-card{ background:#0f172a; border:1px solid rgba(99,102,241,.2); border-radius:12px; padding:14px 16px; }
+        .smallcaps{ color:#93c5fd; }
+        </style>
+        """
+    else:  # "Slate Blue"
+        css = """
+        <style>
+        [data-testid="stAppViewContainer"] { background:#0f172a; color:#e2e8f0; } /* slate-900 */
+        [data-testid="stSidebar"] { background:#111827; border-right:1px solid #1f2937; }
+        [data-testid="stVerticalBlock"] { background:#0b1220; border-radius:12px; padding:1rem; margin-bottom:1rem; box-shadow:0 2px 10px rgba(2,6,23,.6); }
+        h1,h2,h3,h4,h5,h6,p,label,span { color:#e2e8f0 !important; }
+        .stButton>button { background:linear-gradient(90deg,#818cf8,#22d3ee); color:#0b1220; border:none; border-radius:8px; padding:.5rem 1rem; font-weight:700; }
+        .stButton>button:hover { background:linear-gradient(90deg,#a5b4fc,#67e8f9); transform:translateY(-2px); box-shadow:0 4px 12px rgba(129,140,248,.35); }
+        .stTabs [data-baseweb="tab-list"]{ gap:10px; }
+        .stTabs [data-baseweb="tab"]{ background:#111827; color:#cbd5e1; border:1px solid #1f2937; border-radius:10px; font-weight:700; }
+        .stTabs [data-baseweb="tab"]:hover{ background:#0b1220; color:#f8fafc; }
+        .stTabs [aria-selected="true"]{ background:linear-gradient(135deg,#22d3ee,#818cf8,#a78bfa); color:#0b1220 !important; border:none; box-shadow:0 4px 12px rgba(34,211,238,.35); }
+        .stTabs [data-baseweb="tab-panel"]{ background:#0f172a; border-radius:10px; padding:1rem; box-shadow:inset 0 0 0 1px rgba(148,163,184,.12); }
+        .metric-card{ background:#0b1220; border:1px solid rgba(148,163,184,.25); border-radius:12px; padding:14px 16px; }
+        .smallcaps{ color:#94a3b8; }
+        </style>
+        """
+    st.markdown(css, unsafe_allow_html=True)
+
+apply_theme(theme)
 
 # ---- Global Theme (Dark Grey) + Attractive Tabs + KPI Cards ----
 st.markdown(
@@ -452,3 +536,4 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
