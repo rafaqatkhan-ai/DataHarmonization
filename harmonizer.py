@@ -659,33 +659,33 @@ def run_pipeline(
     # 2) Read & align metadata
     m = _read_metadata_any(metadata_file, name_hint=metadata_name_hint)
     # --- ID column detection (robust) ---
-def _norm(s):
-    return re.sub(r"[^a-z0-9]", "", str(s).strip().lower())
+    def _norm(s):
+        return re.sub(r"[^a-z0-9]", "", str(s).strip().lower())
 
-# Normalize metadata columns and candidate names
-norm_cols = { _norm(c): c for c in m.columns }
-norm_candidates = [_norm(c) for c in metadata_id_cols]
+    # Normalize metadata columns and candidate names
+    norm_cols = { _norm(c): c for c in m.columns }
+    norm_candidates = [_norm(c) for c in metadata_id_cols]
 
-id_col = None
-for nc in norm_candidates:
-    if nc in norm_cols:
-        id_col = norm_cols[nc]
-        break
+    id_col = None
+    for nc in norm_candidates:
+        if nc in norm_cols:
+            id_col = norm_cols[nc]
+            break
 
-# Fallback: choose the metadata column with the most overlap to expression sample names
-if id_col is None:
-    expr_cols = set(map(str, meta_base['bare_id'].tolist()))
-    best_col, best_overlap = None, -1
-    for c in m.columns:
-        vals = set(m[c].astype(str).str.strip())
-        ov = len(vals & expr_cols)
-        if ov > best_overlap:
-            best_overlap, best_col = ov, c
+    # Fallback: choose the metadata column with the most overlap to expression sample names
+    if id_col is None:
+        expr_cols = set(map(str, meta_base['bare_id'].tolist()))
+        best_col, best_overlap = None, -1
+        for c in m.columns:
+            vals = set(m[c].astype(str).str.strip())
+            ov = len(vals & expr_cols)
+            if ov > best_overlap:
+                best_overlap, best_col = ov, c
     if best_overlap > 0:
         id_col = best_col
 
-if id_col is None:
-    raise ValueError(f"Could not find an ID column among {metadata_id_cols} in metadata: {list(m.columns)}")
+    if id_col is None:
+        raise ValueError(f"Could not find an ID column among {metadata_id_cols} in metadata: {list(m.columns)}")
 
     id_col = next((c for c in metadata_id_cols if c in m.columns), None)
     if id_col is None:
@@ -823,4 +823,5 @@ if id_col is None:
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
 
