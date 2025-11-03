@@ -14,45 +14,70 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Overall tab bar spacing */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-    }
+    /* ---------- Base (light mode) ---------- */
+    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
 
-    /* Default (unselected) tabs */
     .stTabs [data-baseweb="tab"] {
         padding: 10px 20px;
-        border-radius: 10px;
-        background: #e9f0fa; /* soft blue background */
-        color: #1e3a8a;       /* navy text */
+        border-radius: 12px;
+        background: #e9f0fa;           /* soft blue */
+        color: #1e3a8a;                 /* navy text */
         font-weight: 600;
-        transition: all 0.25s ease-in-out;
+        transition: all .25s ease-in-out;
         border: 1px solid #cbd5e1;
     }
-
-    /* Hover effect for tabs */
     .stTabs [data-baseweb="tab"]:hover {
         background: #cfe0ff;
         color: #0a2540;
         transform: translateY(-1px);
-        box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+        box-shadow: 0 2px 6px rgba(0,0,0,.08);
     }
-
-    /* Active (selected) tab */
     .stTabs [aria-selected="true"] {
-        background: linear-gradient(135deg, #2563eb, #1e40af); /* deep blue gradient */
-        color: white !important;
+        background: linear-gradient(135deg, #2563eb, #1e40af); /* blue gradient */
+        color: #ffffff !important;
         border: none;
-        box-shadow: 0 2px 8px rgba(37,99,235,0.35);
+        box-shadow: 0 2px 10px rgba(37,99,235,.35);
     }
-
-    /* Optional tweak for Streamlit default tabs container */
     .stTabs [data-baseweb="tab-panel"] {
         background: #ffffff;
-        border-radius: 10px;
+        border-radius: 12px;
         padding: 1rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        box-shadow: 0 2px 8px rgba(0,0,0,.05);
         margin-top: 8px;
+    }
+
+    /* ---------- Dark mode (automatic) ---------- */
+    @media (prefers-color-scheme: dark) {
+      .stTabs [data-baseweb="tab"] {
+          background: #111827;           /* slate-900 */
+          color: #e5e7eb;                /* gray-200 */
+          border: 1px solid #1f2937;     /* slate-800 */
+          box-shadow: none;
+      }
+      .stTabs [data-baseweb="tab"]:hover {
+          background: #0b1220;           /* deep navy hover */
+          color: #f3f4f6;                /* gray-100 */
+          transform: translateY(-1px);
+          box-shadow: 0 2px 8px rgba(0,0,0,.35);
+      }
+      .stTabs [aria-selected="true"] {
+          background: linear-gradient(135deg, #06b6d4, #6366f1); /* cyan→indigo */
+          color: #0b1020 !important;
+          border: none;
+          box-shadow: 0 4px 16px rgba(6,182,212,.35);
+      }
+      .stTabs [data-baseweb="tab-panel"] {
+          background: #0b1020;           /* near-black with blue tint */
+          border-radius: 12px;
+          padding: 1rem;
+          box-shadow: inset 0 0 0 1px rgba(99,102,241,.15);
+          margin-top: 8px;
+      }
+      /* Optional: soften the radio control row above tabs */
+      .stRadio > div[role="radiogroup"] label {
+          background: #0b1020;
+          border-radius: 10px;
+      }
     }
     </style>
     """,
@@ -351,5 +376,6 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
