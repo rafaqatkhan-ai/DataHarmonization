@@ -5,7 +5,7 @@ import pandas as pd
 from harmonizer import run_pipeline
 
 st.set_page_config(
-    #page_title="🧬 Data Harmonization & QC Suite",
+    page_title="🧬 Data Harmonization & QC Suite",
     page_icon="🧬",
     layout="wide",
 )
@@ -51,19 +51,19 @@ st.markdown(
     <h1 class="centered-title">
         <span>🧬</span> Data Harmonization & QC Suite <span>🧬</span>
     </h1>
-    <p class="subtitle">Upload expression data, perform harmonization, QC, and analysis — all in one place.</p>
     """,
     unsafe_allow_html=True
 )
 
-#st.title("🧬 Data Harmonization & QC Suite")
-st.caption("Upload expression data (single matrix OR one file per group) + metadata, then click **Run Harmonization**.")
-
+# ---- Expression Upload Mode ----
 mode = st.radio(
     "Expression upload mode",
     ["Single expression matrix", "Multiple files (one per group)"],
-    horizontal=True
+    horizontal=True,
 )
+
+# ---- Caption under mode selector ----
+st.caption("Upload expression data (single matrix OR one file per group) + metadata, then click **Run Harmonization**.")
 
 # ---------------- Expression upload ----------------
 single_expr_file = None
@@ -348,6 +348,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
