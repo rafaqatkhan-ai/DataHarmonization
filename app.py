@@ -13,6 +13,99 @@ st.set_page_config(
 st.markdown(
     """
     <style>
+    /* ---------- Dark Grey Background Theme ---------- */
+    [data-testid="stAppViewContainer"] {
+        background-color: #1e1e1e;  /* main dark grey */
+        color: #e5e7eb;
+    }
+
+    [data-testid="stSidebar"] {
+        background-color: #2a2a2a;
+        color: #f3f3f3;
+        border-right: 1px solid #3a3a3a;
+    }
+
+    [data-testid="stHeader"] {
+        background-color: transparent;
+    }
+
+    [data-testid="stVerticalBlock"] {
+        background-color: #252525;
+        border-radius: 12px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    }
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6, p, label, span {
+        color: #e5e7eb !important;
+    }
+
+    /* Buttons */
+    .stButton>button {
+        background: linear-gradient(90deg, #2563eb, #1d4ed8);
+        color: white;
+        border-radius: 8px;
+        border: none;
+        padding: 0.5rem 1rem;
+        font-weight: 600;
+        transition: all 0.3s ease-in-out;
+    }
+    .stButton>button:hover {
+        background: linear-gradient(90deg, #3b82f6, #2563eb);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 10px rgba(37, 99, 235, 0.4);
+    }
+
+    /* ---------- Attractive Tabs (dark mode compatible) ---------- */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 10px;
+    }
+
+    /* Default tabs */
+    .stTabs [data-baseweb="tab"] {
+        padding: 10px 20px;
+        border-radius: 10px;
+        background: #2d2d2d;  /* dark neutral */
+        color: #cbd5e1;       /* slate-300 text */
+        font-weight: 600;
+        transition: all 0.25s ease-in-out;
+        border: 1px solid #3b3b3b;
+    }
+
+    /* Hover effect */
+    .stTabs [data-baseweb="tab"]:hover {
+        background: #383838;
+        color: #f8fafc;
+        transform: translateY(-1px);
+        box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+    }
+
+    /* Active tab */
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, #06b6d4, #3b82f6, #6366f1);
+        color: #0b1020 !important;
+        border: none;
+        box-shadow: 0 4px 12px rgba(6,182,212,0.35);
+    }
+
+    /* Panel under tabs */
+    .stTabs [data-baseweb="tab-panel"] {
+        background: #1e1e1e;
+        border-radius: 10px;
+        padding: 1rem;
+        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
+        margin-top: 8px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    """
+    <style>
     /* Set full background color */
     [data-testid="stAppViewContainer"] {
         background-color: #f3f4f6;  /* light gray */
@@ -393,6 +486,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
