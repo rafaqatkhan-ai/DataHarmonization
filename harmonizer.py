@@ -10,10 +10,9 @@ from matplotlib.patches import Ellipse
 
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import silhouette_score
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import LocalOutlierFactor
+from sklearn.metrics import silhouette_score
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message="divide by zero encountered")
@@ -344,11 +343,68 @@ def smart_batch_collapse(meta: pd.DataFrame, min_size: int) -> pd.Series:
         mapping[batch] = f"small_{main_group}"
     return b.map(mapping)
 
-# ---------------- QC plots ----------------
+# ---------------- Figures helpers ----------------
 
 def _savefig(path: str):
     plt.savefig(path, dpi=300, bbox_inches="tight"); plt.close()
 
+# New: clinically useful QC & KPIs
+def create_sample_qc_figures(raw_expr, expr_log2, meta, figdir: str) -> List[str]:
+    os.makedirs(figdir, exist_ok=True)
+    paths = []
+    # library size (sum counts) from raw_expr if available, else proxy from exp2
+    libsize = raw_expr.sum(axis=0).astype(float)
+    zero_rate = (raw_expr == 0).sum(axis=0) / raw_expr.shape[0]
+    qc = pd.DataFrame({"library_size": libsize, "zero_rate": zero_rate}, index=raw_expr.columns)
+    qc.to_csv(os.path.join(figdir, "..", "sample_qc.tsv"), sep="\t")
+
+    # Library size bar
+    plt.figure(figsize=(12,4))
+    plt.bar(range(len(libsize)), libsize.values)
+    plt.title("Per-sample Library Size (pre-log)"); plt.xlabel("Samples"); plt.ylabel("Sum of counts")
+    _savefig(os.path.join(figdir, "qc_library_size.png")); paths.append(os.path.join(figdir, "qc_library_size.png"))
+
+    # Zero rate histogram
+    z = zero_rate.values
+    plt.figure(figsize=(8,4))
+    plt.hist(z[np.isfinite(z)], bins=40, density=False)
+    plt.title("Per-sample Zero Rate"); plt.xlabel("Fraction zeros"); plt.ylabel("Samples")
+    _savefig(os.path.join(figdir, "qc_zero_rate_hist.png")); paths.append(os.path.join(figdir, "qc_zero_rate_hist.png"))
+    return paths
+
+def plot_housekeeping_stability(expr_log2, figdir: str) -> Optional[str]:
+    hk = [g for g in HOUSEKEEPING_GENES if g in expr_log2.index.astype(str)]
+    if not hk: return None
+    cv = expr_log2.loc[hk].std(axis=1, ddof=1) / expr_log2.loc[hk].mean(axis=1).replace(0,np.nan)
+    plt.figure(figsize=(7,4))
+    plt.bar(range(len(cv)), cv.values)
+    plt.xticks(range(len(cv)), cv.index, rotation=45, ha="right")
+    plt.title("Housekeeping Gene Stability (CV)")
+    p = os.path.join(figdir, "hk_cv.png"); _savefig(p); return p
+
+def plot_sex_marker_check(expr_log2, meta, figdir: str) -> Optional[str]:
+    # average markers
+    f_mark = [g for g in SEX_MARKERS["female"] if g in expr_log2.index.astype(str)]
+    m_mark = [g for g in SEX_MARKERS["male"] if g in expr_log2.index.astype(str)]
+    if not f_mark and not m_mark: return None
+    fem = expr_log2.loc[f_mark].mean(axis=0) if f_mark else pd.Series(0, index=expr_log2.columns)
+    mal = expr_log2.loc[m_mark].mean(axis=0) if m_mark else pd.Series(0, index=expr_log2.columns)
+    plt.figure(figsize=(6,6))
+    plt.scatter(mal.values, fem.values, s=40, alpha=0.8)
+    plt.xlabel("Male markers (avg log2)"); plt.ylabel("Female markers (avg log2)")
+    plt.title("Sex-marker Concordance (per sample)")
+    # if metadata has sex, try to color mismatches (simple heuristic)
+    if any(c.lower() in ["sex","gender"] for c in meta.columns):
+        sex_col = next(c for c in meta.columns if c.lower() in ["sex","gender"])
+        sex = meta[sex_col].astype(str).reindex(expr_log2.columns)
+        for i, s in enumerate(sex):
+            if isinstance(s, str) and s:
+                # heuristic mismatch region
+                if s.lower().startswith("m") and fem.iloc[i] > mal.iloc[i]:
+                    plt.annotate("?", (mal.iloc[i], fem.iloc[i]))
+                if s.lower().startswith("f") and mal.iloc[i] > fem.iloc[i]:
+                    plt.annotate("?", (mal.iloc[i], fem.iloc[i]))
+    p = os.path.join(figdir, "sex_marker_concordance.png"); _savefig(p); return p
 
 def create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, figdir: str) -> List[str]:
     os.makedirs(figdir, exist_ok=True)
@@ -382,7 +438,7 @@ def create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, figdir: st
     plt.xlabel("log2(Expression + 1)"); plt.ylabel("Density"); plt.legend()
     p = os.path.join(figdir, "group_density_post_log2.png"); _savefig(p); paths.append(p)
 
-    # boxplot (use labels=... for MPL compatibility)
+    # boxplot
     group_vals, labels = [], []
     for grp in groups_seen:
         cols = meta.index[meta["group"]==grp]
@@ -407,7 +463,6 @@ def create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, figdir: st
 
 def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization_mode):
     groups = list(pd.unique(meta['group'].astype(str)))
-    # color cycle handled by mpl; keep it simple but consistent
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     # PC1 vs PC2 by group
     ax1 = axes[0,0]
@@ -478,6 +533,21 @@ def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization
     plt.legend(fontsize=11); plt.grid(True, alpha=0.3); plt.tight_layout()
     _savefig(os.path.join(output_dir, "pca_clean_groups.png"))
 
+def pca_loadings_plots(pca_model: PCA, expr_harmonized: pd.DataFrame, figdir: str, topn: int = 20):
+    # top genes contributing to PC1/PC2
+    comps = pca_model.components_
+    genes = expr_harmonized.index.astype(str).tolist()
+    if comps.shape[1] != len(genes):  # should match after safe_matrix_for_pca zscored & transpose
+        # map back using columns of Xc in run_pipeline; if mismatch, skip
+        return
+    for i in range(min(2, comps.shape[0])):
+        w = comps[i]
+        idx = np.argsort(np.abs(w))[-topn:][::-1]
+        plt.figure(figsize=(10,4))
+        plt.bar(range(topn), w[idx])
+        plt.xticks(range(topn), [genes[j] for j in idx], rotation=60, ha="right", fontsize=8)
+        plt.title(f"Top {topn} Loadings: PC{i+1}")
+        _savefig(os.path.join(figdir, f"pca_loadings_pc{i+1}.png"))
 
 def nonlinear_embedding_plots(Xc, meta, figdir, harmonization_mode, make=True):
     if not make: return
@@ -518,10 +588,7 @@ def detect_outliers(expr_log2: pd.DataFrame) -> pd.DataFrame:
          .replace([np.inf, -np.inf], np.nan)
          .fillna(0.0))
 
-    # Ensure consistent dtypes & avoid sklearn feature-name checks by using ndarray
     X_np = X.to_numpy(dtype=float)
-
-    # Not enough samples?
     n_samples = X_np.shape[0]
     if n_samples == 0:
         return pd.DataFrame(columns=["IsolationForest", "LOF"])
@@ -531,11 +598,9 @@ def detect_outliers(expr_log2: pd.DataFrame) -> pd.DataFrame:
     scaler = StandardScaler(with_mean=True, with_std=True)
     Xs = scaler.fit_transform(X_np)
 
-    # Isolation Forest
     iso = IsolationForest(contamination="auto", random_state=42)
     iso_flag = iso.fit_predict(Xs)
 
-    # LOF (choose a valid neighbor count)
     try:
         n_neighbors = max(2, min(20, n_samples - 1))
         if n_samples >= 3:
@@ -581,7 +646,6 @@ def differential_expression(expr_log2: pd.DataFrame, meta: pd.DataFrame,
         A_cols = meta.index[meta["group"]==A]
         B_cols = meta.index[meta["group"]==B]
         if len(A_cols) < 2 or len(B_cols) < 2:
-            # need at least 2 samples each for Welch's t-test
             continue
         Xa = expr_log2[A_cols]; Xb = expr_log2[B_cols]
         ma = Xa.mean(axis=1); mb = Xb.mean(axis=1)
@@ -592,6 +656,53 @@ def differential_expression(expr_log2: pd.DataFrame, meta: pd.DataFrame,
                            "log2FC": log2fc, "t": t, "pval": p, "qval": q}).sort_values("qval")
         res[f"{A}_vs_{B}"] = df
     return res
+
+def volcano_and_ma_plots(de_df: pd.DataFrame, contrast_name: str, figdir: str):
+    # Volcano: log2FC vs -log10(pval)
+    if de_df is None or de_df.empty: return
+    log2fc = de_df["log2FC"].values
+    p = de_df["pval"].clip(lower=1e-300).values
+    q = de_df["qval"].values
+    neglogp = -np.log10(p)
+    plt.figure(figsize=(8,6))
+    plt.scatter(log2fc, neglogp, s=6, alpha=0.6)
+    plt.xlabel("log2FC"); plt.ylabel("-log10(p)")
+    plt.title(f"Volcano: {contrast_name}")
+    _savefig(os.path.join(figdir, f"volcano_{contrast_name}.png"))
+
+    # MA plot: avg expression vs log2FC
+    # use mean of groups if available
+    means = None
+    for c in de_df.columns:
+        if c.startswith("mean_"):
+            if means is None: means = de_df[c].values
+            else: means = (means + de_df[c].values)/2.0
+    if means is None:
+        means = np.zeros_like(log2fc)
+    plt.figure(figsize=(8,6))
+    plt.scatter(means, log2fc, s=6, alpha=0.6)
+    plt.xlabel("Avg log2 expression"); plt.ylabel("log2FC")
+    plt.title(f"MA Plot: {contrast_name}")
+    _savefig(os.path.join(figdir, f"ma_{contrast_name}.png"))
+
+def heatmap_top_de(expr_log2: pd.DataFrame, meta: pd.DataFrame, de_df: pd.DataFrame, contrast_name: str, figdir: str, topn: int = 50):
+    if de_df is None or de_df.empty: return
+    top = de_df.sort_values("qval").head(topn).index
+    sub = expr_log2.loc[expr_log2.index.intersection(top)]
+    if sub.empty: return
+    # z-score rows
+    mu = sub.mean(axis=1); sd = sub.std(axis=1, ddof=1).replace(0,np.nan)
+    z = sub.sub(mu, axis=0).div(sd, axis=0).fillna(0)
+    # order samples by group for readability
+    order = meta.sort_values("group").index
+    z = z[order.intersection(z.columns)]
+    plt.figure(figsize=(max(10, z.shape[1] * 0.15), max(6, z.shape[0] * 0.15)))
+    plt.imshow(z.values, aspect="auto", interpolation="nearest", vmin=-2.5, vmax=2.5)
+    plt.colorbar(label="Z-score")
+    plt.yticks(range(z.shape[0]), z.index, fontsize=7)
+    plt.xticks(range(z.shape[1]), z.columns, fontsize=6, rotation=90)
+    plt.title(f"Top {min(topn, z.shape[0])} DE genes: {contrast_name}")
+    _savefig(os.path.join(figdir, f"heatmap_top_{topn}_{contrast_name}.png"))
 
 # ---------------- GSEA (optional) ----------------
 
@@ -663,18 +774,15 @@ def run_pipeline(
     def _norm(s):
         return re.sub(r"[^a-z0-9]", "", str(s).strip().lower())
 
-    # Normalize metadata columns and candidate names
     norm_cols = { _norm(c): c for c in m.columns }
     norm_candidates = [_norm(c) for c in metadata_id_cols]
 
     id_col = None
-    # (1) exact match after normalization
     for nc in norm_candidates:
         if nc in norm_cols:
             id_col = norm_cols[nc]
             break
 
-    # (2) fallback: choose metadata column with maximum overlap with expression sample names
     if id_col is None:
         expr_cols = set(map(str, meta_base['bare_id'].tolist()))
         best_col, best_overlap = None, -1
@@ -706,7 +814,6 @@ def run_pipeline(
 
     # for single-file mode, meta_base.bare_id is the column name; for multi-file it's the suffix after "__"
     meta = meta_base.copy()
-    # If group labels exist in metadata, map them in
     if group_col is not None:
         meta["group_external"] = m_align[group_col].reindex(meta["bare_id"]).values
         meta["group"] = meta["group_external"].where(meta["group_external"].notna(), meta["group"])
@@ -714,13 +821,11 @@ def run_pipeline(
     if metadata_batch_col is not None and metadata_batch_col in m_align.columns:
         meta["batch_external_raw"] = m_align[metadata_batch_col].reindex(meta["bare_id"]).values
         meta["batch_external"] = pd.Series(meta["batch_external_raw"], index=meta.index).map(normalize_batch_token)
-        # fallback to inference
         inferred = infer_batches(meta)
         meta["batch"] = meta["batch_external"].where(meta["batch_external"].notna(), inferred)
     else:
         meta["batch"] = infer_batches(meta)
 
-    # keep common columns if present
     keep = ["group","batch"]
     for extra in ("Age","age","Sex","sex","Gender","gender"):
         if extra in m_align.columns:
@@ -767,10 +872,29 @@ def run_pipeline(
     Xp = pca.transform(Xc)
     pca_df = pd.DataFrame(Xp[:, :min(6, Xp.shape[1])], columns=[f"PC{i+1}" for i in range(min(6, Xp.shape[1]))], index=Xc.index).join(meta)
 
+    # 7b) KPIs: silhouette (batch vs group) on first 4 PCs
+    kpi = {}
+    try:
+        use = [c for c in ["PC1","PC2","PC3","PC4"] if c in pca_df.columns]
+        Xs = pca_df[use].values
+        if len(np.unique(meta["batch_collapsed"])) > 1:
+            kpi["silhouette_batch"] = float(silhouette_score(Xs, meta["batch_collapsed"].astype(str)))
+        if len(np.unique(meta["group"])) > 1:
+            kpi["silhouette_group"] = float(silhouette_score(Xs, meta["group"].astype(str)))
+    except Exception:
+        pass
+
     # 8) Figures
-    figs = create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, FIGDIR)
+    figs = []
+    figs += create_sample_qc_figures(combined_expr, expr_log2, meta, FIGDIR)
+    figs += create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, FIGDIR)
     create_enhanced_pca_plots(pca_df, pca, meta, FIGDIR, mode)
+    pca_loadings_plots(pca, expr_harmonized, FIGDIR)
     nonlinear_embedding_plots(Xc, meta, FIGDIR, mode, make=make_nonlinear)
+
+    # Sex markers & HK stability (if available)
+    hk = plot_housekeeping_stability(expr_log2, FIGDIR)
+    sexp = plot_sex_marker_check(expr_log2, meta, FIGDIR)
 
     # 9) Outliers
     outliers = detect_outliers(expr_log2); outliers.to_csv(os.path.join(OUTDIR, "outliers.tsv"), sep="\t")
@@ -778,14 +902,16 @@ def run_pipeline(
     # 10) DE (group contrasts)
     groups = [g for g in pd.unique(meta["group"].astype(str)) if g and g == g]
     default_contrasts = [(a,b) for a in groups for b in groups if a!=b]
-    # Filter to a few sensible contrasts (against ALL doesn't make sense)
     default_contrasts = [c for c in default_contrasts if not ("ALL" in c)]
     de = differential_expression(expr_log2, meta, default_contrasts)
     de_dir = os.path.join(OUTDIR, "de"); os.makedirs(de_dir, exist_ok=True)
     for k, df in de.items():
         df.to_csv(os.path.join(de_dir, f"DE_{k}.tsv"), sep="\t")
+        # Key visuals for first few contrasts
+        volcano_and_ma_plots(df, k, FIGDIR)
+        heatmap_top_de(expr_log2, meta, df, k, FIGDIR, topn=50)
 
-    # 11) GSEA (optional; uses t-stat as ranking; falls back gracefully)
+    # 11) GSEA (optional)
     gsea_dir = os.path.join(OUTDIR, "gsea"); os.makedirs(gsea_dir, exist_ok=True)
     if gsea_gmt and os.path.exists(gsea_gmt):
         for k, df in de.items():
@@ -802,7 +928,8 @@ def run_pipeline(
     rep = {
         "qc": {"data_type": dtype, "platform": platform,
                "zero_fraction": float(diags.get("zero_fraction", np.nan)),
-               "harmonization_mode": mode},
+               "harmonization_mode": mode,
+               **kpi},
         "shapes": {"genes": int(combined_expr.shape[0]), "samples": int(combined_expr.shape[1])}
     }
     with open(os.path.join(OUTDIR, "report.json"), "w") as f:
