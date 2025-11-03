@@ -259,7 +259,7 @@ with st.expander("2) Upload Metadata (TSV/CSV/XLSX)"):
 
     id_cols = st.text_input(
         "Candidate ID columns (comma-separated)",
-        "Id,ID,id,CleanID,sample,Sample"
+        "Id,ID,id,CleanID,sample,Sample,sample_id,Sample_ID,SampleID"
     )
     grp_cols = st.text_input(
         "Candidate GROUP columns (comma-separated)",
@@ -514,5 +514,6 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
