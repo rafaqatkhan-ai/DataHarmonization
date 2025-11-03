@@ -734,7 +734,7 @@ def run_pipeline(
     metadata_batch_col: Optional[str] = None,
     out_root: str = "out",
     fig_subdir: str = "figs",
-    min_batch_size_for_combat: int = 5,
+    min_batch_size_for_combat: int = 2,
     pca_topk_features: int = 5000,
     make_nonlinear: bool = True,
     gsea_gmt: Optional[str] = None,  # optional path to .gmt
@@ -950,3 +950,4 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
