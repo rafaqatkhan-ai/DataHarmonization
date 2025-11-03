@@ -56,7 +56,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("🧬 Data Harmonization & QC Suite")
+#st.title("🧬 Data Harmonization & QC Suite")
 st.caption("Upload expression data (single matrix OR one file per group) + metadata, then click **Run Harmonization**.")
 
 mode = st.radio(
@@ -348,6 +348,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
