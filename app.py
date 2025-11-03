@@ -4,14 +4,14 @@ import streamlit as st
 import pandas as pd
 from harmonizer import run_pipeline
 
+# ---- Page Setup ----
 st.set_page_config(
     page_title="🧬 Data Harmonization & QC Suite",
     page_icon="🧬",
     layout="wide",
 )
 
-# ---- Minimal theming polish
-# ---- Custom Title (centered, styled) ----
+# ---- Custom Centered Title with Subtitle ----
 st.markdown(
     """
     <style>
@@ -51,6 +51,9 @@ st.markdown(
     <h1 class="centered-title">
         <span>🧬</span> Data Harmonization & QC Suite <span>🧬</span>
     </h1>
+    <p class="subtitle">
+        Upload expression data, perform harmonization, QC, and analysis — all in one place.
+    </p>
     """,
     unsafe_allow_html=True
 )
@@ -62,8 +65,10 @@ mode = st.radio(
     horizontal=True,
 )
 
-# ---- Caption under mode selector ----
-st.caption("Upload expression data (single matrix OR one file per group) + metadata, then click **Run Harmonization**.")
+# ---- Instruction caption under radio buttons ----
+st.caption(
+    "Upload expression data (single matrix **or** one file per group) and corresponding metadata, then click **Run Harmonization**."
+)
 
 # ---------------- Expression upload ----------------
 single_expr_file = None
@@ -348,6 +353,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
