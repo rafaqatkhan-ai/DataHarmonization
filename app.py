@@ -11,75 +11,47 @@ st.set_page_config(
 )
 
 # ---- Minimal theming polish
+# ---- Custom Title (centered, styled) ----
 st.markdown(
     """
     <style>
-    /* ---------- Base (light mode) ---------- */
-    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
-
-    .stTabs [data-baseweb="tab"] {
-        padding: 10px 20px;
-        border-radius: 12px;
-        background: #e9f0fa;           /* soft blue */
-        color: #1e3a8a;                 /* navy text */
-        font-weight: 600;
-        transition: all .25s ease-in-out;
-        border: 1px solid #cbd5e1;
+    .centered-title {
+        font-size: 2.4rem;
+        font-weight: 800;
+        text-align: center;
+        color: #1e40af;
+        margin-top: -0.5rem;
+        background: linear-gradient(90deg, #2563eb, #1e3a8a);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
     }
-    .stTabs [data-baseweb="tab"]:hover {
-        background: #cfe0ff;
-        color: #0a2540;
-        transform: translateY(-1px);
-        box-shadow: 0 2px 6px rgba(0,0,0,.08);
+    .centered-title span {
+        font-size: 2.8rem;
     }
-    .stTabs [aria-selected="true"] {
-        background: linear-gradient(135deg, #2563eb, #1e40af); /* blue gradient */
-        color: #ffffff !important;
-        border: none;
-        box-shadow: 0 2px 10px rgba(37,99,235,.35);
+    .subtitle {
+        text-align: center;
+        color: #475569;
+        font-size: 1rem;
+        margin-top: -0.6rem;
+        font-style: italic;
     }
-    .stTabs [data-baseweb="tab-panel"] {
-        background: #ffffff;
-        border-radius: 12px;
-        padding: 1rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,.05);
-        margin-top: 8px;
-    }
-
-    /* ---------- Dark mode (automatic) ---------- */
     @media (prefers-color-scheme: dark) {
-      .stTabs [data-baseweb="tab"] {
-          background: #111827;           /* slate-900 */
-          color: #e5e7eb;                /* gray-200 */
-          border: 1px solid #1f2937;     /* slate-800 */
-          box-shadow: none;
-      }
-      .stTabs [data-baseweb="tab"]:hover {
-          background: #0b1220;           /* deep navy hover */
-          color: #f3f4f6;                /* gray-100 */
-          transform: translateY(-1px);
-          box-shadow: 0 2px 8px rgba(0,0,0,.35);
-      }
-      .stTabs [aria-selected="true"] {
-          background: linear-gradient(135deg, #06b6d4, #6366f1); /* cyan→indigo */
-          color: #0b1020 !important;
-          border: none;
-          box-shadow: 0 4px 16px rgba(6,182,212,.35);
-      }
-      .stTabs [data-baseweb="tab-panel"] {
-          background: #0b1020;           /* near-black with blue tint */
-          border-radius: 12px;
-          padding: 1rem;
-          box-shadow: inset 0 0 0 1px rgba(99,102,241,.15);
-          margin-top: 8px;
-      }
-      /* Optional: soften the radio control row above tabs */
-      .stRadio > div[role="radiogroup"] label {
-          background: #0b1020;
-          border-radius: 10px;
-      }
+        .centered-title {
+            color: #93c5fd;
+            background: linear-gradient(90deg, #06b6d4, #6366f1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .subtitle {
+            color: #cbd5e1;
+        }
     }
     </style>
+
+    <h1 class="centered-title">
+        <span>🧬</span> Data Harmonization & QC Suite <span>🧬</span>
+    </h1>
+    <p class="subtitle">Upload expression data, perform harmonization, QC, and analysis — all in one place.</p>
     """,
     unsafe_allow_html=True
 )
@@ -376,6 +348,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
