@@ -41,10 +41,12 @@ def apply_theme(t: str):
             box-shadow:0 4px 10px rgba(37,99,235,.25) !important;
         }
 
-        .stTabs [data-baseweb="tab-list"]{ gap:10px !important; }
+        /* --- Increased tab width --- */
+        .stTabs [data-baseweb="tab-list"]{ gap:16px !important; }
         .stTabs [data-baseweb="tab"]{
             background:#e9f0fa !important; color:#1e3a8a !important; border:1px solid #cbd5e1 !important;
             border-radius:10px !important; font-weight:700 !important; transition:all .25s ease-in-out !important;
+            min-width:130px !important; padding:0.6rem 1.2rem !important;
         }
         .stTabs [data-baseweb="tab"]:hover{ background:#dbeafe !important; color:#0a2540 !important; transform:translateY(-1px) !important; }
         .stTabs [aria-selected="true"]{
@@ -75,10 +77,11 @@ def apply_theme(t: str):
             box-shadow:0 4px 10px rgba(16,185,129,.25) !important;
         }
 
-        .stTabs [data-baseweb="tab-list"]{ gap:10px !important; }
+        /* --- Increased tab width --- */
+        .stTabs [data-baseweb="tab-list"]{ gap:16px !important; }
         .stTabs [data-baseweb="tab"]{
             background:#fff7ed !important; color:#7c2d12 !important; border:1px solid #fed7aa !important;
-            border-radius:10px !important; font-weight:700 !important;
+            border-radius:10px !important; font-weight:700 !important; min-width:130px !important; padding:0.6rem 1.2rem !important;
         }
         .stTabs [data-baseweb="tab"]:hover{ background:#ffedd5 !important; color:#4a1d0a !important; }
         .stTabs [aria-selected="true"]{
@@ -109,10 +112,11 @@ def apply_theme(t: str):
             box-shadow:0 4px 12px rgba(34,211,238,.35) !important;
         }
 
-        .stTabs [data-baseweb="tab-list"]{ gap:10px !important; }
+        /* --- Increased tab width --- */
+        .stTabs [data-baseweb="tab-list"]{ gap:16px !important; }
         .stTabs [data-baseweb="tab"]{
             background:#111827 !important; color:#cbd5e1 !important; border:1px solid #1f2937 !important;
-            border-radius:10px !important; font-weight:700 !important;
+            border-radius:10px !important; font-weight:700 !important; min-width:130px !important; padding:0.6rem 1.2rem !important;
         }
         .stTabs [data-baseweb="tab"]:hover{ background:#0b1220 !important; color:#f1f5f9 !important; }
         .stTabs [aria-selected="true"]{
@@ -143,10 +147,11 @@ def apply_theme(t: str):
             box-shadow:0 4px 12px rgba(129,140,248,.35) !important;
         }
 
-        .stTabs [data-baseweb="tab-list"]{ gap:10px !important; }
+        /* --- Increased tab width --- */
+        .stTabs [data-baseweb="tab-list"]{ gap:16px !important; }
         .stTabs [data-baseweb="tab"]{
             background:#111827 !important; color:#cbd5e1 !important; border:1px solid #1f2937 !important;
-            border-radius:10px !important; font-weight:700 !important;
+            border-radius:10px !important; font-weight:700 !important; min-width:130px !important; padding:0.6rem 1.2rem !important;
         }
         .stTabs [data-baseweb="tab"]:hover{ background:#0b1220 !important; color:#f8fafc !important; }
         .stTabs [aria-selected="true"]{
@@ -163,6 +168,12 @@ def apply_theme(t: str):
 
 # (Inject theme CSS LAST so it overrides everything)
 apply_theme(theme)
+
+# =========================
+# TITLE (kept separate)
+# =========================
+# (the rest of your code remains identical)
+
 
 # =========================
 # TITLE (kept separate)
@@ -503,4 +514,5 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
