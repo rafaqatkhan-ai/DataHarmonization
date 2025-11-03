@@ -10,7 +10,10 @@ st.set_page_config(
     page_icon="🧬",
     layout="wide",
 )
-# ---- Theme selector (non-black options) ----
+
+# =========================
+# THEME SELECTOR (non-black)
+# =========================
 theme = st.selectbox(
     "Theme",
     ["Light Gray", "Soft Off-White", "Deep Navy", "Slate Blue"],
@@ -19,179 +22,154 @@ theme = st.selectbox(
 )
 
 def apply_theme(t: str):
+    # Each theme block uses !important to override any earlier CSS.
     if t == "Light Gray":
         css = """
         <style>
-        [data-testid="stAppViewContainer"] { background:#f3f4f6; color:#0f172a; }
-        [data-testid="stSidebar"] { background:#e5e7eb; border-right:1px solid #cbd5e1; }
-        [data-testid="stVerticalBlock"] { background:#ffffff; border-radius:12px; padding:1rem; margin-bottom:1rem; box-shadow:0 2px 8px rgba(15,23,42,0.06); }
+        [data-testid="stAppViewContainer"] { background:#f3f4f6 !important; color:#0f172a !important; }
+        [data-testid="stSidebar"] { background:#e5e7eb !important; border-right:1px solid #cbd5e1 !important; }
+        [data-testid="stVerticalBlock"] { background:#ffffff !important; border-radius:12px; padding:1rem; margin-bottom:1rem; box-shadow:0 2px 8px rgba(15,23,42,0.06) !important; }
+
         h1,h2,h3,h4,h5,h6,p,label,span { color:#0f172a !important; }
-        .stButton>button { background:linear-gradient(90deg,#2563eb,#1d4ed8); color:#fff; border:none; border-radius:8px; padding:.5rem 1rem; font-weight:600; }
-        .stButton>button:hover { background:linear-gradient(90deg,#3b82f6,#2563eb); transform:translateY(-2px); box-shadow:0 4px 10px rgba(37,99,235,.25); }
-        .stTabs [data-baseweb="tab-list"]{ gap:10px; }
-        .stTabs [data-baseweb="tab"]{ background:#e9f0fa; color:#1e3a8a; border:1px solid #cbd5e1; border-radius:10px; font-weight:700; }
-        .stTabs [data-baseweb="tab"]:hover{ background:#dbeafe; color:#0a2540; }
-        .stTabs [aria-selected="true"]{ background:linear-gradient(135deg,#2563eb,#1e40af); color:#fff !important; box-shadow:0 4px 10px rgba(37,99,235,.25); border:none; }
-        .stTabs [data-baseweb="tab-panel"]{ background:#ffffff; border-radius:10px; padding:1rem; box-shadow:0 2px 8px rgba(15,23,42,.05); }
-        .metric-card{ background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:14px 16px; }
-        .smallcaps{ color:#475569; }
+
+        .stButton>button {
+            background:linear-gradient(90deg,#2563eb,#1d4ed8) !important; color:#fff !important; border:none !important;
+            border-radius:8px !important; padding:.5rem 1rem !important; font-weight:600 !important;
+        }
+        .stButton>button:hover {
+            background:linear-gradient(90deg,#3b82f6,#2563eb) !important; transform:translateY(-2px) !important;
+            box-shadow:0 4px 10px rgba(37,99,235,.25) !important;
+        }
+
+        .stTabs [data-baseweb="tab-list"]{ gap:10px !important; }
+        .stTabs [data-baseweb="tab"]{
+            background:#e9f0fa !important; color:#1e3a8a !important; border:1px solid #cbd5e1 !important;
+            border-radius:10px !important; font-weight:700 !important; transition:all .25s ease-in-out !important;
+        }
+        .stTabs [data-baseweb="tab"]:hover{ background:#dbeafe !important; color:#0a2540 !important; transform:translateY(-1px) !important; }
+        .stTabs [aria-selected="true"]{
+            background:linear-gradient(135deg,#2563eb,#1e40af) !important; color:#fff !important;
+            box-shadow:0 4px 10px rgba(37,99,235,.25) !important; border:none !important; transform:translateY(-1px) !important;
+        }
+        .stTabs [data-baseweb="tab-panel"]{ background:#ffffff !important; border-radius:10px !important; padding:1rem !important; box-shadow:0 2px 8px rgba(15,23,42,.05) !important; }
+
+        .metric-card{ background:#f8fafc !important; border:1px solid #e2e8f0 !important; border-radius:12px !important; padding:14px 16px !important; }
+        .smallcaps{ color:#475569 !important; }
         </style>
         """
     elif t == "Soft Off-White":
         css = """
         <style>
-        [data-testid="stAppViewContainer"] { background:#faf7f2; color:#1f2937; }
-        [data-testid="stSidebar"] { background:#f3efe8; border-right:1px solid #e5e7eb; }
-        [data-testid="stVerticalBlock"] { background:#ffffff; border-radius:12px; padding:1rem; margin-bottom:1rem; box-shadow:0 2px 10px rgba(0,0,0,0.06); }
+        [data-testid="stAppViewContainer"] { background:#faf7f2 !important; color:#1f2937 !important; }
+        [data-testid="stSidebar"] { background:#f3efe8 !important; border-right:1px solid #e5e7eb !important; }
+        [data-testid="stVerticalBlock"] { background:#ffffff !important; border-radius:12px !important; padding:1rem !important; margin-bottom:1rem !important; box-shadow:0 2px 10px rgba(0,0,0,0.06) !important; }
+
         h1,h2,h3,h4,h5,h6,p,label,span { color:#111827 !important; }
-        .stButton>button { background:linear-gradient(90deg,#10b981,#059669); color:#fff; border:none; border-radius:8px; padding:.5rem 1rem; font-weight:600; }
-        .stButton>button:hover { background:linear-gradient(90deg,#34d399,#10b981); transform:translateY(-2px); box-shadow:0 4px 10px rgba(16,185,129,.25); }
-        .stTabs [data-baseweb="tab-list"]{ gap:10px; }
-        .stTabs [data-baseweb="tab"]{ background:#fff7ed; color:#7c2d12; border:1px solid #fed7aa; border-radius:10px; font-weight:700; }
-        .stTabs [data-baseweb="tab"]:hover{ background:#ffedd5; color:#4a1d0a; }
-        .stTabs [aria-selected="true"]{ background:linear-gradient(135deg,#f97316,#ef4444); color:#fff !important; border:none; box-shadow:0 4px 12px rgba(249,115,22,.25); }
-        .stTabs [data-baseweb="tab-panel"]{ background:#ffffff; border-radius:10px; padding:1rem; box-shadow:0 2px 8px rgba(0,0,0,.05); }
-        .metric-card{ background:#ffffff; border:1px solid #f3f4f6; border-radius:12px; padding:14px 16px; }
-        .smallcaps{ color:#6b7280; }
+
+        .stButton>button {
+            background:linear-gradient(90deg,#10b981,#059669) !important; color:#fff !important; border:none !important;
+            border-radius:8px !important; padding:.5rem 1rem !important; font-weight:600 !important;
+        }
+        .stButton>button:hover {
+            background:linear-gradient(90deg,#34d399,#10b981) !important; transform:translateY(-2px) !important;
+            box-shadow:0 4px 10px rgba(16,185,129,.25) !important;
+        }
+
+        .stTabs [data-baseweb="tab-list"]{ gap:10px !important; }
+        .stTabs [data-baseweb="tab"]{
+            background:#fff7ed !important; color:#7c2d12 !important; border:1px solid #fed7aa !important;
+            border-radius:10px !important; font-weight:700 !important;
+        }
+        .stTabs [data-baseweb="tab"]:hover{ background:#ffedd5 !important; color:#4a1d0a !important; }
+        .stTabs [aria-selected="true"]{
+            background:linear-gradient(135deg,#f97316,#ef4444) !important; color:#fff !important; border:none !important;
+            box-shadow:0 4px 12px rgba(249,115,22,.25) !important; transform:translateY(-1px) !important;
+        }
+        .stTabs [data-baseweb="tab-panel"]{ background:#ffffff !important; border-radius:10px !important; padding:1rem !important; box-shadow:0 2px 8px rgba(0,0,0,.05) !important; }
+
+        .metric-card{ background:#ffffff !important; border:1px solid #f3f4f6 !important; border-radius:12px !important; padding:14px 16px !important; }
+        .smallcaps{ color:#6b7280 !important; }
         </style>
         """
     elif t == "Deep Navy":
         css = """
         <style>
-        [data-testid="stAppViewContainer"] { background:#0b1020; color:#e5e7eb; }
-        [data-testid="stSidebar"] { background:#0f172a; color:#f3f4f6; border-right:1px solid #1f2a44; }
-        [data-testid="stVerticalBlock"] { background:#0d142a; border-radius:12px; padding:1rem; margin-bottom:1rem; box-shadow:0 2px 12px rgba(0,0,0,.5); }
+        [data-testid="stAppViewContainer"] { background:#0b1020 !important; color:#e5e7eb !important; }
+        [data-testid="stSidebar"] { background:#0f172a !important; color:#f3f4f6 !important; border-right:1px solid #1f2a44 !important; }
+        [data-testid="stVerticalBlock"] { background:#0d142a !important; border-radius:12px !important; padding:1rem !important; margin-bottom:1rem !important; box-shadow:0 2px 12px rgba(0,0,0,.5) !important; }
+
         h1,h2,h3,h4,h5,h6,p,label,span { color:#e5e7eb !important; }
-        .stButton>button { background:linear-gradient(90deg,#06b6d4,#3b82f6); color:#0b1020; border:none; border-radius:8px; padding:.5rem 1rem; font-weight:700; }
-        .stButton>button:hover { background:linear-gradient(90deg,#22d3ee,#60a5fa); transform:translateY(-2px); box-shadow:0 4px 12px rgba(34,211,238,.35); }
-        .stTabs [data-baseweb="tab-list"]{ gap:10px; }
-        .stTabs [data-baseweb="tab"]{ background:#111827; color:#cbd5e1; border:1px solid #1f2937; border-radius:10px; font-weight:700; }
-        .stTabs [data-baseweb="tab"]:hover{ background:#0b1220; color:#f1f5f9; }
-        .stTabs [aria-selected="true"]{ background:linear-gradient(135deg,#06b6d4,#6366f1); color:#0b1020 !important; border:none; box-shadow:0 4px 12px rgba(6,182,212,.35); }
-        .stTabs [data-baseweb="tab-panel"]{ background:#0b1020; border-radius:10px; padding:1rem; box-shadow:inset 0 0 0 1px rgba(99,102,241,.15); }
-        .metric-card{ background:#0f172a; border:1px solid rgba(99,102,241,.2); border-radius:12px; padding:14px 16px; }
-        .smallcaps{ color:#93c5fd; }
+
+        .stButton>button {
+            background:linear-gradient(90deg,#06b6d4,#3b82f6) !important; color:#0b1020 !important; border:none !important;
+            border-radius:8px !important; padding:.5rem 1rem !important; font-weight:700 !important;
+        }
+        .stButton>button:hover {
+            background:linear-gradient(90deg,#22d3ee,#60a5fa) !important; transform:translateY(-2px) !important;
+            box-shadow:0 4px 12px rgba(34,211,238,.35) !important;
+        }
+
+        .stTabs [data-baseweb="tab-list"]{ gap:10px !important; }
+        .stTabs [data-baseweb="tab"]{
+            background:#111827 !important; color:#cbd5e1 !important; border:1px solid #1f2937 !important;
+            border-radius:10px !important; font-weight:700 !important;
+        }
+        .stTabs [data-baseweb="tab"]:hover{ background:#0b1220 !important; color:#f1f5f9 !important; }
+        .stTabs [aria-selected="true"]{
+            background:linear-gradient(135deg,#06b6d4,#6366f1) !important; color:#0b1020 !important; border:none !important;
+            box-shadow:0 4px 12px rgba(6,182,212,.35) !important; transform:translateY(-1px) !important;
+        }
+        .stTabs [data-baseweb="tab-panel"]{ background:#0b1020 !important; border-radius:10px !important; padding:1rem !important; box-shadow:inset 0 0 0 1px rgba(99,102,241,.15) !important; }
+
+        .metric-card{ background:#0f172a !important; border:1px solid rgba(99,102,241,.2) !important; border-radius:12px !important; padding:14px 16px !important; }
+        .smallcaps{ color:#93c5fd !important; }
         </style>
         """
     else:  # "Slate Blue"
         css = """
         <style>
-        [data-testid="stAppViewContainer"] { background:#0f172a; color:#e2e8f0; } /* slate-900 */
-        [data-testid="stSidebar"] { background:#111827; border-right:1px solid #1f2937; }
-        [data-testid="stVerticalBlock"] { background:#0b1220; border-radius:12px; padding:1rem; margin-bottom:1rem; box-shadow:0 2px 10px rgba(2,6,23,.6); }
+        [data-testid="stAppViewContainer"] { background:#0f172a !important; color:#e2e8f0 !important; } /* slate-900 */
+        [data-testid="stSidebar"] { background:#111827 !important; border-right:1px solid #1f2937 !important; }
+        [data-testid="stVerticalBlock"] { background:#0b1220 !important; border-radius:12px !important; padding:1rem !important; margin-bottom:1rem !important; box-shadow:0 2px 10px rgba(2,6,23,.6) !important; }
+
         h1,h2,h3,h4,h5,h6,p,label,span { color:#e2e8f0 !important; }
-        .stButton>button { background:linear-gradient(90deg,#818cf8,#22d3ee); color:#0b1220; border:none; border-radius:8px; padding:.5rem 1rem; font-weight:700; }
-        .stButton>button:hover { background:linear-gradient(90deg,#a5b4fc,#67e8f9); transform:translateY(-2px); box-shadow:0 4px 12px rgba(129,140,248,.35); }
-        .stTabs [data-baseweb="tab-list"]{ gap:10px; }
-        .stTabs [data-baseweb="tab"]{ background:#111827; color:#cbd5e1; border:1px solid #1f2937; border-radius:10px; font-weight:700; }
-        .stTabs [data-baseweb="tab"]:hover{ background:#0b1220; color:#f8fafc; }
-        .stTabs [aria-selected="true"]{ background:linear-gradient(135deg,#22d3ee,#818cf8,#a78bfa); color:#0b1220 !important; border:none; box-shadow:0 4px 12px rgba(34,211,238,.35); }
-        .stTabs [data-baseweb="tab-panel"]{ background:#0f172a; border-radius:10px; padding:1rem; box-shadow:inset 0 0 0 1px rgba(148,163,184,.12); }
-        .metric-card{ background:#0b1220; border:1px solid rgba(148,163,184,.25); border-radius:12px; padding:14px 16px; }
-        .smallcaps{ color:#94a3b8; }
+
+        .stButton>button {
+            background:linear-gradient(90deg,#818cf8,#22d3ee) !important; color:#0b1220 !important; border:none !important;
+            border-radius:8px !important; padding:.5rem 1rem !important; font-weight:700 !important;
+        }
+        .stButton>button:hover {
+            background:linear-gradient(90deg,#a5b4fc,#67e8f9) !important; transform:translateY(-2px) !important;
+            box-shadow:0 4px 12px rgba(129,140,248,.35) !important;
+        }
+
+        .stTabs [data-baseweb="tab-list"]{ gap:10px !important; }
+        .stTabs [data-baseweb="tab"]{
+            background:#111827 !important; color:#cbd5e1 !important; border:1px solid #1f2937 !important;
+            border-radius:10px !important; font-weight:700 !important;
+        }
+        .stTabs [data-baseweb="tab"]:hover{ background:#0b1220 !important; color:#f8fafc !important; }
+        .stTabs [aria-selected="true"]{
+            background:linear-gradient(135deg,#22d3ee,#818cf8,#a78bfa) !important; color:#0b1220 !important; border:none !important;
+            box-shadow:0 4px 12px rgba(34,211,238,.35) !important; transform:translateY(-1px) !important;
+        }
+        .stTabs [data-baseweb="tab-panel"]{ background:#0f172a !important; border-radius:10px !important; padding:1rem !important; box-shadow:inset 0 0 0 1px rgba(148,163,184,.12) !important; }
+
+        .metric-card{ background:#0b1220 !important; border:1px solid rgba(148,163,184,.25) !important; border-radius:12px !important; padding:14px 16px !important; }
+        .smallcaps{ color:#94a3b8 !important; }
         </style>
         """
     st.markdown(css, unsafe_allow_html=True)
 
+# (Inject theme CSS LAST so it overrides everything)
 apply_theme(theme)
 
-# ---- Global Theme (Dark Grey) + Attractive Tabs + KPI Cards ----
+# =========================
+# TITLE (kept separate)
+# =========================
 st.markdown(
     """
     <style>
-    /* ---------- Dark Grey Background Theme ---------- */
-    [data-testid="stAppViewContainer"] {
-        background-color: #1e1e1e;  /* main dark grey */
-        color: #e5e7eb;
-    }
-    [data-testid="stSidebar"] {
-        background-color: #2a2a2a;
-        color: #f3f3f3;
-        border-right: 1px solid #3a3a3a;
-    }
-    [data-testid="stHeader"] {
-        background-color: transparent;
-    }
-    [data-testid="stVerticalBlock"] {
-        background-color: #252525;
-        border-radius: 12px;
-        padding: 1rem;
-        margin-bottom: 1rem;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
-    }
-
-    /* Typography */
-    h1, h2, h3, h4, h5, h6, p, label, span {
-        color: #e5e7eb !important;
-    }
-
-    /* Buttons */
-    .stButton>button {
-        background: linear-gradient(90deg, #2563eb, #1d4ed8);
-        color: white;
-        border-radius: 8px;
-        border: none;
-        padding: 0.5rem 1rem;
-        font-weight: 600;
-        transition: all 0.3s ease-in-out;
-    }
-    .stButton>button:hover {
-        background: linear-gradient(90deg, #3b82f6, #2563eb);
-        transform: translateY(-2px);
-        box-shadow: 0 4px 10px rgba(37, 99, 235, 0.4);
-    }
-
-    /* ---------- Attractive Tabs (dark mode compatible) ---------- */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        padding: 10px 20px;
-        border-radius: 10px;
-        background: #2d2d2d;  /* dark neutral */
-        color: #cbd5e1;       /* slate-300 text */
-        font-weight: 700;
-        transition: all 0.25s ease-in-out;
-        border: 1px solid #3b3b3b;
-    }
-    .stTabs [data-baseweb="tab"]:hover {
-        background: #383838;
-        color: #f8fafc;
-        transform: translateY(-1px);
-        box-shadow: 0 2px 6px rgba(0,0,0,0.25);
-    }
-    .stTabs [aria-selected="true"] {
-        background: linear-gradient(135deg, #06b6d4, #3b82f6, #6366f1);
-        color: #0b1020 !important;
-        border: none;
-        box-shadow: 0 4px 12px rgba(6,182,212,0.35);
-        transform: translateY(-1px);
-    }
-    .stTabs [data-baseweb="tab-panel"] {
-        background: #1e1e1e;
-        border-radius: 10px;
-        padding: 1rem;
-        box-shadow: inset 0 0 0 1px rgba(255,255,255,0.05);
-        margin-top: 8px;
-    }
-
-    /* KPI metric cards */
-    .metric-card {
-        background: #1f2937; /* slate-800 */
-        border-radius: 12px;
-        padding: 14px 16px;
-        margin-bottom: 12px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.35);
-        border: 1px solid rgba(255,255,255,0.06);
-    }
-    .smallcaps {
-        font-variant: all-small-caps;
-        letter-spacing: 0.04em;
-        color: #a3a3a3;
-        margin-top: -6px;
-    }
-
-    /* Title + subtitle styling (animated gradient text) */
     .centered-title {
         font-size: 2.6rem;
         font-weight: 900;
@@ -218,19 +196,13 @@ st.markdown(
     }
     .subtitle {
         text-align: center;
-        color: #cbd5e1;
+        opacity: .9;
         font-size: 1rem;
         margin-top: -0.6rem;
         font-style: italic;
     }
     </style>
-    """,
-    unsafe_allow_html=True
-)
 
-# ---- Custom Centered Title with Subtitle ----
-st.markdown(
-    """
     <h1 class="centered-title">
         <span>🧬</span> Data Harmonization & QC Suite <span>🧬</span>
     </h1>
@@ -241,14 +213,14 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ---- Expression Upload Mode ----
+# =========================
+# UI CONTROLS
+# =========================
 mode = st.radio(
     "Expression upload mode",
     ["Single expression matrix", "Multiple files (one per group)"],
     horizontal=True,
 )
-
-# ---- Instruction caption under radio buttons ----
 st.caption(
     "Upload expression data (single matrix **or** one file per group) and corresponding metadata, then click **Run Harmonization**."
 )
@@ -284,7 +256,7 @@ with st.expander("2) Upload Metadata (TSV/CSV/XLSX)"):
     )
     batch_col = st.text_input("Batch column name (optional; leave blank to auto-detect)", "")
 
-    # Preview detected metadata columns to help users type exact names
+    # Preview detected metadata columns
     if metadata_file is not None:
         try:
             bio = io.BytesIO(metadata_file.getvalue())
@@ -378,6 +350,7 @@ if run:
     except Exception:
         pass
 
+    # KPI Cards
     kcol1, kcol2, kcol3, kcol4 = st.columns(4)
     qc = report.get("qc", {})
     shp = report.get("shapes", {})
@@ -404,13 +377,8 @@ if run:
     # ---- Overview
     with tabs[0]:
         st.json(report if report else {"info":"report.json not found"})
-        # Show a few key figures if present
         fig_dir = out["figdir"]
-        previews = [
-            "dist_pre_vs_post_log2.png",
-            "pca_clean_groups.png",
-            "enhanced_pca_analysis.png",
-        ]
+        previews = ["dist_pre_vs_post_log2.png", "pca_clean_groups.png", "enhanced_pca_analysis.png"]
         show = [f for f in previews if os.path.exists(os.path.join(fig_dir, f))]
         if show:
             st.write("### Key Figures")
@@ -460,7 +428,6 @@ if run:
         fig_dir = out["figdir"]
         de_dir = os.path.join(out["outdir"], "de")
         de_files = [f for f in os.listdir(de_dir)] if os.path.isdir(de_dir) else []
-        # pick contrast
         contrasts = [f.replace("DE_","").replace(".tsv","") for f in de_files if f.startswith("DE_")]
         pick = st.selectbox("Select contrast", contrasts) if contrasts else None
         if pick:
@@ -536,4 +503,3 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
-
