@@ -232,9 +232,9 @@ def detect_data_type_and_platform(X: pd.DataFrame) -> Tuple[str, str, Dict]:
     zero_frac = float((X==0).sum().sum()) / float(X.size) if X.size else 0.0
     rng = (np.nanpercentile(vals, 99.5) - np.nanpercentile(vals, 0.5)) if vals.size else 0
     idx_str = X.index.astype(str)
-    has_ilumn = any(s.startswith("ILMN_") for s in idx_str)
-    has_affy  = any(re.match(r"^\d+_at$", s) for s in idx_str)
-    has_ensembl = any(s.startswith("ENSG") for s in idx_str)
+    has_ilumn = any(str(s).startswith("ILMN_") for s in idx_str)
+    has_affy  = any(re.match(r"^\d+_at$", str(s)) for s in idx_str)
+    has_ensembl = any(str(s).startswith("ENSG") for s in idx_str)
     data_type = "bulk"
     if zero_frac >= ZERO_INFLATION_THRESH:
         data_type = "scRNA-seq"
@@ -658,6 +658,7 @@ def run_pipeline(
 
     # 2) Read & align metadata
     m = _read_metadata_any(metadata_file, name_hint=metadata_name_hint)
+
     # --- ID column detection (robust) ---
     def _norm(s):
         return re.sub(r"[^a-z0-9]", "", str(s).strip().lower())
@@ -667,12 +668,13 @@ def run_pipeline(
     norm_candidates = [_norm(c) for c in metadata_id_cols]
 
     id_col = None
+    # (1) exact match after normalization
     for nc in norm_candidates:
         if nc in norm_cols:
             id_col = norm_cols[nc]
             break
 
-    # Fallback: choose the metadata column with the most overlap to expression sample names
+    # (2) fallback: choose metadata column with maximum overlap with expression sample names
     if id_col is None:
         expr_cols = set(map(str, meta_base['bare_id'].tolist()))
         best_col, best_overlap = None, -1
@@ -681,13 +683,9 @@ def run_pipeline(
             ov = len(vals & expr_cols)
             if ov > best_overlap:
                 best_overlap, best_col = ov, c
-    if best_overlap > 0:
-        id_col = best_col
+        if best_overlap > 0:
+            id_col = best_col
 
-    if id_col is None:
-        raise ValueError(f"Could not find an ID column among {metadata_id_cols} in metadata: {list(m.columns)}")
-
-    id_col = next((c for c in metadata_id_cols if c in m.columns), None)
     if id_col is None:
         raise ValueError(f"Could not find an ID column among {metadata_id_cols} in metadata: {list(m.columns)}")
 
@@ -702,6 +700,8 @@ def run_pipeline(
             batch_like = [c for c in m.columns if str(c).lower().startswith("batch")]
             metadata_batch_col = batch_like[0] if batch_like else None
 
+    # clean & align
+    m[id_col] = m[id_col].astype(str).str.strip()
     m_align = m.set_index(id_col)
 
     # for single-file mode, meta_base.bare_id is the column name; for multi-file it's the suffix after "__"
@@ -823,5 +823,3 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
-
-
