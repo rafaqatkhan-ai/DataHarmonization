@@ -365,10 +365,10 @@ if run:
     try:
         with st.spinner("Running harmonization..."):
         # near the top (after imports)
-        if "run_id" not in st.session_state:
-            st.session_state.run_id = None
-        if "out" not in st.session_state:
-            st.session_state.out = None
+            if "run_id" not in st.session_state:
+                st.session_state.run_id = None
+            if "out" not in st.session_state:
+                st.session_state.out = None
 
         # when you kick off a run (inside if run:)
         import datetime as _dt
@@ -556,6 +556,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
