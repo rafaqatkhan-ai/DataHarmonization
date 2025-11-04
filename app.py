@@ -215,11 +215,11 @@ if mode == "Multiple files (one per group)":
     with st.expander("1) Upload Expression Files (one per group)"):
         col1, col2 = st.columns(2)
         with col1:
-            normal_file = st.file_uploader("Normal (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="normal")
-            atypia_file = st.file_uploader("Atypia (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="atypia")
+            normal_file = st.file_uploader("First (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="normal")
+            atypia_file = st.file_uploader("Second (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="atypia")
         with col2:
-            hpv_pos_file = st.file_uploader("HPV Positive (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="hpvp")
-            hpv_neg_file = st.file_uploader("HPV Negative (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="hpvn")
+            hpv_pos_file = st.file_uploader("Third (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="hpvp")
+            hpv_neg_file = st.file_uploader("Fourth (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="hpvn")
 else:
     with st.expander("1) Upload Single Expression Matrix (XLSX/CSV/TSV)"):
         single_expr_file = st.file_uploader("Expression matrix", type=["xlsx","csv","tsv","txt"], key="single_expr")
@@ -297,10 +297,10 @@ if run:
     # Expression inputs
     if mode == "Multiple files (one per group)":
         groups = {}
-        if normal_file: groups["Normal"] = io.BytesIO(normal_file.getvalue())
-        if atypia_file: groups["Atypia"] = io.BytesIO(atypia_file.getvalue())
-        if hpv_pos_file: groups["HPV_Pos"] = io.BytesIO(hpv_pos_file.getvalue())
-        if hpv_neg_file: groups["HPV_Neg"] = io.BytesIO(hpv_neg_file.getvalue())
+        if normal_file: groups["First"] = io.BytesIO(normal_file.getvalue())
+        if atypia_file: groups["Second"] = io.BytesIO(atypia_file.getvalue())
+        if hpv_pos_file: groups["Third"] = io.BytesIO(hpv_pos_file.getvalue())
+        if hpv_neg_file: groups["Fourth"] = io.BytesIO(hpv_neg_file.getvalue())
         if not groups:
             st.error("Please upload at least one expression file.")
             st.stop()
@@ -571,3 +571,4 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
