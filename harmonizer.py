@@ -912,6 +912,7 @@ def run_pipeline(
     # GUARANTEE 'group' EXISTS (defensive)
     if "group" not in meta.columns:
         meta["group"] = "ALL"
+    meta["group"] = meta["group"].fillna("ALL").apply(normalize_group_value)
 
     # map batch (prefer external; else infer)
     if metadata_batch_col is not None and metadata_batch_col in m_align.columns:
@@ -1101,4 +1102,5 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
 
