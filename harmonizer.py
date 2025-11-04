@@ -542,7 +542,7 @@ def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization
     meta["group"] = meta["group"].apply(normalize_group_value)
     pca_df = pca_df.copy()
     pca_df["group"] = pca_df["group"].apply(normalize_group_value)
-    groups = list(pd.unique(meta['group'].astype(str)))
+    group = list(pd.unique(meta['group'].astype(str)))
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     # PC1 vs PC2 by group
     ax1 = axes[0,0]
@@ -1094,6 +1094,7 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
 
 
 
