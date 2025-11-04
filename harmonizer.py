@@ -17,6 +17,32 @@ from sklearn.metrics import silhouette_score
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message="divide by zero encountered")
 warnings.filterwarnings("ignore", message="invalid value encountered")
+# ---- Dedup helpers -----------------------------------------------------------
+def _collapse_dupes_df_by_index(df: pd.DataFrame, how_num: str = "median", keep: str = "first") -> pd.DataFrame:
+    """
+    Ensure df has a unique index. If duplicates exist:
+      - numeric cols collapsed by 'median' (or 'mean')
+      - non-numeric cols keep first (or last)
+    """
+    if not df.index.duplicated().any():
+        return df
+
+    num = df.select_dtypes(include=[np.number]).columns
+    non = [c for c in df.columns if c not in num]
+
+    if how_num not in {"median", "mean"}:
+        how_num = "median"
+
+    agg_spec = {}
+    if len(num):
+        agg_spec.update({c: (how_num if how_num in {"median","mean"} else "median") for c in num})
+    if len(non):
+        agg_spec.update({c: (lambda x: x.iloc[0] if keep == "first" else x.iloc[-1]) for c in non})
+
+    out = (df.groupby(level=0, sort=False).agg(agg_spec))
+    out.index.name = df.index.name
+    return out
+
 
 # ---------- Optional imports ----------
 _HAVE_SCANPY = _HAVE_GSEAPY = _HAVE_UMAP = _HAVE_TSNE = False
@@ -760,40 +786,37 @@ def run_pipeline(
     os.makedirs(FIGDIR, exist_ok=True); os.makedirs(REPORT_DIR, exist_ok=True)
 
     # 1) Load expression
+    # 1) Load expression
     if single_expression_file is not None:
         expr = read_expression_any(single_expression_file, name_hint=single_expression_name_hint, group_name=None)
         combined_expr = expr
-        meta_base = build_metadata_from_columns(list(combined_expr.columns), groups_from_prefix=False)
+        groups_from_prefix = False
     else:
         if not group_to_file or len(group_to_file) == 0:
             raise ValueError("Provide at least one expression file (single or multi).")
         loaded = {g: read_expression_any(f, name_hint=str(f), group_name=g) for g, f in group_to_file.items()}
         combined_expr = pd.concat([loaded[g] for g in loaded.keys()], axis=1, join="outer")
-        combined_expr = combined_expr.replace([np.inf, -np.inf], np.nan)
-        meta_base = build_metadata_from_columns(list(combined_expr.columns), groups_from_prefix=True)
+        combined_expr = combined_expr.replace([np.inf,-np.inf], np.nan)
+        groups_from_prefix = True
 
-    notes = {}  # <-- collect housekeeping notes for report
+    notes = {}
 
-    # (A) Deduplicate duplicate SAMPLE COLUMNS in the expression matrix
-    #     If the same sample ID appears multiple times, collapse by median across the duplicate columns.
+    # (A) Collapse duplicate SAMPLE COLUMNS in expression by median
     if combined_expr.columns.duplicated().any():
-        dup_counts = int(combined_expr.columns.duplicated().sum())
-        notes["dedup_expression_columns"] = f"Collapsed {dup_counts} duplicate sample columns by median."
+        dup_n = int(combined_expr.columns.duplicated().sum())
         combined_expr = (
-            combined_expr.T
-            .groupby(level=0, sort=False)
-            .median(numeric_only=True)
-            .T
+            combined_expr.T.groupby(level=0, sort=False).median(numeric_only=True).T
         )
-        # Rebuild meta_base since columns changed
-        meta_base = build_metadata_from_columns(list(combined_expr.columns), groups_from_prefix="__" in " ".join(combined_expr.columns))
+        notes["dedup_expression_columns"] = f"Collapsed {dup_n} duplicate sample columns by median."
 
-    # (B) Ensure meta_base index itself has no duplicates (shouldn't after (A), but be safe)
+    # (B) (re)build meta_base from FINAL column set
+    meta_base = build_metadata_from_columns(list(combined_expr.columns), groups_from_prefix=groups_from_prefix)
+
+    # (C) Guard: meta_base should not have duplicate index; if it does, collapse (keep first)
     if meta_base.index.duplicated().any():
-        kept = meta_base.loc[~meta_base.index.duplicated(keep="first")]
-        dropped = int(len(meta_base) - len(kept))
-        notes["dedup_meta_base_index"] = f"Removed {dropped} duplicate sample names from meta_base."
-        meta_base = kept
+        dropped = int(meta_base.index.duplicated().sum())
+        meta_base = meta_base.loc[~meta_base.index.duplicated(keep="first")].copy()
+        notes["dedup_meta_base_index"] = f"Removed {dropped} duplicate entries in meta_base index."
 
 
     # 2) Read & align metadata
@@ -837,27 +860,28 @@ def run_pipeline(
             metadata_batch_col = batch_like[0] if batch_like else None
 
     # clean & align (dedupe metadata rows by ID)
+    # clean & align (dedupe metadata rows by ID; keep first)
     m[id_col] = m[id_col].astype(str).str.strip()
     before_rows = len(m)
     m = m.dropna(subset=[id_col])
-    # Keep the first occurrence of each ID; drop the rest
     m = m[~m[id_col].duplicated(keep="first")].copy()
     after_rows = len(m)
-    dropped_meta_dups = before_rows - after_rows
-    if dropped_meta_dups > 0:
-        notes["dedup_metadata_rows"] = f"Dropped {dropped_meta_dups} duplicate metadata rows (by ID)."
+    if after_rows < before_rows:
+        notes["dedup_metadata_rows"] = f"Dropped {before_rows - after_rows} duplicate metadata rows (by {id_col})."
 
     m_align = m.set_index(id_col)
 
-    # Normalize IDs in meta_base to string for consistent alignment
+    # Build meta scaffold from meta_base (index = FINAL sample names)
     meta = meta_base.copy()
     meta["bare_id"] = meta["bare_id"].astype(str).str.strip()
 
-    meta = meta_base.copy()
+    # map group (optional)
     if group_col is not None:
-        meta["group_external"] = m_align[group_col].reindex(meta["bare_id"]).values
-        meta["group"] = meta["group_external"].where(meta["group_external"].notna(), meta["group"])
+        gser = m_align[group_col] if group_col in m_align.columns else pd.Series(index=m_align.index, dtype=object)
+        meta["group_external"] = gser.reindex(meta["bare_id"]).values
+        meta["group"] = meta["group_external"].where(pd.notna(meta["group_external"]), meta["group"])
 
+    # map batch (prefer external; else infer)
     if metadata_batch_col is not None and metadata_batch_col in m_align.columns:
         meta["batch_external_raw"] = m_align[metadata_batch_col].reindex(meta["bare_id"]).values
         meta["batch_external"] = pd.Series(meta["batch_external_raw"], index=meta.index).map(normalize_batch_token)
@@ -866,6 +890,7 @@ def run_pipeline(
     else:
         meta["batch"] = infer_batches(meta)
 
+    # keep/trim meta columns
     keep = ["group","batch"]
     for extra in ("Age","age","Sex","sex","Gender","gender"):
         if extra in m_align.columns:
@@ -873,6 +898,12 @@ def run_pipeline(
             keep.append(extra)
     meta = meta[keep]
 
+    # >>> CRITICAL: ensure meta index is unique before any reindex/join <<<
+    if meta.index.duplicated().any():
+        dups = int(meta.index.duplicated().sum())
+        # Collapse duplicate sample rows: numeric by median; categorical keep first
+        meta = _collapse_dupes_df_by_index(meta, how_num="median", keep="first")
+        notes["dedup_meta_index"] = f"Collapsed {dups} duplicate sample rows in metadata (by sample index)."
     # Save inputs
     combined_expr.to_csv(os.path.join(OUTDIR, "expression_combined.tsv"), sep="\t")
     meta.to_csv(os.path.join(OUTDIR, "metadata.tsv"), sep="\t")
@@ -893,8 +924,17 @@ def run_pipeline(
     expr_filtered = expr_imputed.loc[pos.nlargest(topk).index] if topk > 0 else expr_imputed.iloc[0:0]
 
     # 6) Batch collapsing + harmonization
+   
     meta["batch_collapsed"] = smart_batch_collapse(meta, min_batch_size_for_combat)
+
+    # Guard: meta must have unique index now
+    if meta.index.duplicated().any():
+        meta = _collapse_dupes_df_by_index(meta, how_num="median", keep="first")
+        notes["dedup_meta_index_again"] = "Collapsed duplicate meta rows prior to reindexing for batch."
+
+    # This reindex requires expr_filtered.columns unique (they are) AND meta index unique (ensured)
     meta_batch = meta["batch_collapsed"].reindex(expr_filtered.columns)
+
     if meta_batch.isna().any():
         meta_batch = meta_batch.fillna(meta["group"].reindex(expr_filtered.columns).astype(str))
 
@@ -982,6 +1022,10 @@ def run_pipeline(
     expr_harmonized.to_csv(os.path.join(OUTDIR, "expression_harmonized.tsv"), sep="\t")
     # Save PCA scores even if empty (UI can still handle)
     pca_df.to_csv(os.path.join(OUTDIR, "pca_scores.tsv"), sep="\t")
+    # (safety) pca_df joins reference meta by index; meta uniqueness is already enforced,
+    # but if anything slipped through, collapse again.
+    if meta.index.duplicated().any():
+        meta = _collapse_dupes_df_by_index(meta, how_num="median", keep="first")
 
     # 13) Simple report
     rep = {
@@ -994,9 +1038,9 @@ def run_pipeline(
     }
     if pca_skipped_reason:
         rep["notes"]["pca_skipped_reason"] = pca_skipped_reason
-    # add dedup notes if any
     for k, v in (notes or {}).items():
         rep["notes"][k] = v
+
 
     # 14) Zip everything
     zip_path = os.path.join(OUTDIR, "results_bundle.zip")
@@ -1013,4 +1057,5 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
 
