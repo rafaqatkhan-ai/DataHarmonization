@@ -390,16 +390,32 @@ def _fallback_center(expr_imputed: pd.DataFrame, meta_batch: pd.Series) -> pd.Da
     return X
 
 def smart_batch_collapse(meta: pd.DataFrame, min_size: int) -> pd.Series:
-    b = meta['batch'].astype(str)
+    """
+    Collapse tiny batches but DO NOT require meta['group'] to exist.
+    Falls back to 'ALL' if group is missing.
+    """
+    meta = meta.copy()
+    if "batch" not in meta.columns:
+        # nothing to collapse; synthesize a single batch
+        return pd.Series("B0", index=meta.index, name="batch_collapsed")
+
+    # make safe views
+    b = meta["batch"].astype(str)
+    g = meta["group"].astype(str) if "group" in meta.columns else pd.Series("ALL", index=meta.index)
+
     counts = b.value_counts()
     large = counts[counts >= min_size].index
     small = counts[counts < min_size].index
-    mapping = {k:k for k in large}
+
+    mapping = {k: k for k in large}
     for batch in small:
-        grp_series = meta.loc[b.index[b==batch], 'group']
-        main_group = grp_series.value_counts().idxmax() if len(grp_series) else "mixed"
+        # choose the dominant group *within that batch*; default to "mixed" if empty
+        idx = b.index[b == batch]
+        grp_series = g.loc[idx] if len(idx) else pd.Series(dtype=str)
+        main_group = (grp_series.value_counts().idxmax() if len(grp_series) else "mixed")
         mapping[batch] = f"small_{main_group}"
-    return b.map(mapping)
+
+    return b.map(mapping).rename("batch_collapsed")
 
 # ---------------- Figures helpers ----------------
 def _savefig(path: str):
@@ -1085,3 +1101,4 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
