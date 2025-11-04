@@ -362,37 +362,40 @@ if run:
         kwargs["single_expression_file"] = io.BytesIO(single_expr_file.getvalue())
         kwargs["single_expression_name_hint"] = single_expr_file.name
 
-    try:
-        with st.spinner("Running harmonization..."):
-        # near the top (after imports)
-            if "run_id" not in st.session_state:
-                st.session_state.run_id = None
-            if "out" not in st.session_state:
-                st.session_state.out = None
+try:
+    with st.spinner("Running harmonization..."):
+        # --- Initialize session state (top of app or before run_pipeline) ---
+        if "run_id" not in st.session_state:
+            st.session_state.run_id = None
+        if "out" not in st.session_state:
+            st.session_state.out = None
 
-        # when you kick off a run (inside if run:)
+        # --- Create unique run ID and set output directory ---
         import datetime as _dt
         run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
         kwargs["out_root"] = os.path.join(out_dir, run_id)
 
+        # --- Run the harmonization pipeline ---
         out = run_pipeline(**kwargs)
 
-        # persist the *current* run
+        # --- Persist current run in Streamlit session state ---
         st.session_state.run_id = run_id
         st.session_state.out = out
 
-        st.error(f"Run failed: {e}")
-        if gmt_file:
-            shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
-        st.stop()
+except Exception as e:
+    st.error(f"Run failed: {e}")
+    if gmt_file:
+        shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+    st.stop()
 
-    # Load report for KPIs *immediately* so we can show any warnings
-    report = {}
-    try:
-        with open(out["report_json"], "r") as fh:
-            report = json.load(fh)
-    except Exception:
-        pass
+# --- Load report for KPIs (after successful run) ---
+report = {}
+try:
+    with open(out["report_json"], "r") as fh:
+        report = json.load(fh)
+except Exception:
+    pass
+
 
     # Show success, then a gentle warning if PCA was skipped
     st.success("Done!")
@@ -556,6 +559,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
