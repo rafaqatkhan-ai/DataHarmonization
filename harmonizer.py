@@ -153,6 +153,10 @@ def read_expression_any(bytes_or_path, name_hint: Optional[str] = None, group_na
         df.columns = [f"{group_name}__{str(c).strip()}" for c in df.columns]
 
     # collapse duplicate gene rows by median
+    # Normalize gene IDs to remove version numbers, whitespace, etc.
+    df.index = df.index.astype(str).str.strip().str.upper()
+    df.index = df.index.str.replace(r'\.\d+$', '', regex=True)
+                        
     return df.groupby(level=0).median(numeric_only=True)
 
 
@@ -950,4 +954,5 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
 
