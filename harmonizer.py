@@ -769,8 +769,32 @@ def run_pipeline(
             raise ValueError("Provide at least one expression file (single or multi).")
         loaded = {g: read_expression_any(f, name_hint=str(f), group_name=g) for g, f in group_to_file.items()}
         combined_expr = pd.concat([loaded[g] for g in loaded.keys()], axis=1, join="outer")
-        combined_expr = combined_expr.replace([np.inf,-np.inf], np.nan)
+        combined_expr = combined_expr.replace([np.inf, -np.inf], np.nan)
         meta_base = build_metadata_from_columns(list(combined_expr.columns), groups_from_prefix=True)
+
+    notes = {}  # <-- collect housekeeping notes for report
+
+    # (A) Deduplicate duplicate SAMPLE COLUMNS in the expression matrix
+    #     If the same sample ID appears multiple times, collapse by median across the duplicate columns.
+    if combined_expr.columns.duplicated().any():
+        dup_counts = int(combined_expr.columns.duplicated().sum())
+        notes["dedup_expression_columns"] = f"Collapsed {dup_counts} duplicate sample columns by median."
+        combined_expr = (
+            combined_expr.T
+            .groupby(level=0, sort=False)
+            .median(numeric_only=True)
+            .T
+        )
+        # Rebuild meta_base since columns changed
+        meta_base = build_metadata_from_columns(list(combined_expr.columns), groups_from_prefix="__" in " ".join(combined_expr.columns))
+
+    # (B) Ensure meta_base index itself has no duplicates (shouldn't after (A), but be safe)
+    if meta_base.index.duplicated().any():
+        kept = meta_base.loc[~meta_base.index.duplicated(keep="first")]
+        dropped = int(len(meta_base) - len(kept))
+        notes["dedup_meta_base_index"] = f"Removed {dropped} duplicate sample names from meta_base."
+        meta_base = kept
+
 
     # 2) Read & align metadata
     m = _read_metadata_any(metadata_file, name_hint=metadata_name_hint)
@@ -812,9 +836,22 @@ def run_pipeline(
             batch_like = [c for c in m.columns if str(c).lower().startswith("batch")]
             metadata_batch_col = batch_like[0] if batch_like else None
 
-    # clean & align
+    # clean & align (dedupe metadata rows by ID)
     m[id_col] = m[id_col].astype(str).str.strip()
+    before_rows = len(m)
+    m = m.dropna(subset=[id_col])
+    # Keep the first occurrence of each ID; drop the rest
+    m = m[~m[id_col].duplicated(keep="first")].copy()
+    after_rows = len(m)
+    dropped_meta_dups = before_rows - after_rows
+    if dropped_meta_dups > 0:
+        notes["dedup_metadata_rows"] = f"Dropped {dropped_meta_dups} duplicate metadata rows (by ID)."
+
     m_align = m.set_index(id_col)
+
+    # Normalize IDs in meta_base to string for consistent alignment
+    meta = meta_base.copy()
+    meta["bare_id"] = meta["bare_id"].astype(str).str.strip()
 
     meta = meta_base.copy()
     if group_col is not None:
@@ -952,13 +989,14 @@ def run_pipeline(
                "zero_fraction": float(diags.get("zero_fraction", np.nan)),
                "harmonization_mode": mode,
                **kpi},
-        "shapes": {"genes": int(combined_expr.shape[0]), "samples": int(combined_expr.shape[1])}
+        "shapes": {"genes": int(combined_expr.shape[0]), "samples": int(combined_expr.shape[1])},
+        "notes": {}
     }
     if pca_skipped_reason:
-        rep["notes"] = {"pca_skipped_reason": pca_skipped_reason}
-
-    with open(os.path.join(OUTDIR, "report.json"), "w") as f:
-        json.dump(rep, f, indent=2)
+        rep["notes"]["pca_skipped_reason"] = pca_skipped_reason
+    # add dedup notes if any
+    for k, v in (notes or {}).items():
+        rep["notes"][k] = v
 
     # 14) Zip everything
     zip_path = os.path.join(OUTDIR, "results_bundle.zip")
@@ -975,3 +1013,4 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
