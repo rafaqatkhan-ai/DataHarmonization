@@ -520,9 +520,9 @@ if run:
                         st.dataframe(df, use_container_width=True)
                     except Exception:
                         pass
-
-# ---- Outliers
-with tabs[4]:
+    # ---- Outliers
+    # ---- Outliers
+    with tabs[4]:
     # Always reference the latest run
     out_curr = st.session_state.get("out") or out
     try:
@@ -571,7 +571,6 @@ with tabs[4]:
     except Exception as e:
         st.warning(f"Could not load outliers for this run: {e}")
 
-
     # ---- Files
     with tabs[5]:
         colA, colB = st.columns(2)
@@ -604,6 +603,7 @@ with tabs[4]:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
