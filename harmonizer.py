@@ -528,7 +528,6 @@ def create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, figdir: st
     return paths
 
 def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization_mode):
-    # Ensure canonical labels in both sources
     meta = meta.copy()
     if "group" not in meta.columns:
         meta["group"] = "ALL"
@@ -537,10 +536,12 @@ def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization
     pca_df = pca_df.copy()
     if "group" not in pca_df.columns:
         pca_df = pca_df.join(meta[["group"]], how="left")
+    # 🔒 Canonicalize exactly what we'll plot
     pca_df["group"] = pca_df["group"].fillna("ALL").apply(normalize_group_value)
 
-    groups = list(pd.unique(meta['group'].astype(str)))
-
+    # ❌ old: groups = list(pd.unique(meta['group'].astype(str)))
+    # ✅ new: drive legend from normalized values actually plotted
+    groups = list(pd.unique(pca_df["group"].astype(str)))
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
     # PC1 vs PC2 by group
@@ -1102,5 +1103,6 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
 
 
