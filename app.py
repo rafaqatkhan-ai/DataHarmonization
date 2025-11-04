@@ -522,15 +522,55 @@ if run:
                         pass
 
     # ---- Outliers
-    with tabs[4]:
-        try:
-            df = pd.read_csv(os.path.join(out["outdir"], "outliers.tsv"), sep="\t", index_col=0)
+# ---- Outliers
+with tabs[4]:
+    # Always point to the latest run artifacts
+    out_curr = st.session_state.get("out") or out  # fallback to local 'out' from this run
+    try:
+        outliers_path = os.path.join(out_curr["outdir"], "outliers.tsv")
+        meta_path = os.path.join(out_curr["outdir"], "metadata.tsv")
+
+        if os.path.exists(outliers_path):
+            df = pd.read_csv(outliers_path, sep="\t", index_col=0)
+
+            # Optional: enrich for readability (sample, bare_id, group)
+            if os.path.exists(meta_path):
+                meta_df = pd.read_csv(meta_path, sep="\t", index_col=0)
+                # meta_df index == sample names; meta_df has 'bare_id' and 'group' cols from your pipeline
+                display_df = (
+                    df.copy()
+                    .assign(sample=df.index)
+                    .join(meta_df[["bare_id","group"]], how="left")
+                    .set_index("sample")
+                    .rename(columns={
+                        "IsolationForest": "IsolationForest_flag",
+                        "LOF": "LOF_flag"
+                    })
+                    # optional: reorder columns
+                    [ ["bare_id", "group", "IsolationForest_flag", "LOF_flag"] ]
+                )
+            else:
+                display_df = df  # fallback if metadata missing
+
             st.write("### Outlier flags (1 = outlier)")
-            st.dataframe(df, use_container_width=True)
-            with open(os.path.join(out["outdir"], "outliers.tsv"), "rb") as fh:
-                safe_download_button("⬇️ Download outlier table", fh.read(), file_name="outliers.tsv", mime="text/tab-separated-values")
-        except Exception:
-            st.info("No outlier table found.")
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                key=f"outliers_df_{st.session_state.get('run_id','noid')}"  # force fresh render each run
+            )
+
+            with open(outliers_path, "rb") as fh:
+                safe_download_button(
+                    "⬇️ Download outlier table",
+                    fh.read(),
+                    file_name="outliers.tsv",
+                    mime="text/tab-separated-values",
+                )
+        else:
+            st.info("No outlier table found for this run.")
+    except Exception as e:
+        st.warning(f"Could not load outliers for this run: {e}")
+
 
     # ---- Files
     with tabs[5]:
@@ -564,6 +604,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
