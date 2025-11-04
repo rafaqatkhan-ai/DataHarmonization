@@ -364,6 +364,13 @@ if run:
 
     try:
         with st.spinner("Running harmonization..."):
+            # app.py — right before you call run_pipeline(...)
+            import datetime as _dt
+
+            # in the "Advanced settings" expander you already have: out_dir = st.text_input("Output directory", "out")
+            run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
+            kwargs["out_root"] = os.path.join(out_dir, run_id)
+
             out = run_pipeline(**kwargs)
     except Exception as e:
         st.error(f"Run failed: {e}")
@@ -541,6 +548,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
