@@ -3,6 +3,26 @@ import os, io, tempfile, shutil, json
 import streamlit as st
 import pandas as pd
 from harmonizer import run_pipeline
+# --- Streamlit compatibility shims (handle older versions that lack certain kwargs) ---
+def safe_button(label, **kwargs):
+    """Try modern st.button signature; on TypeError, drop newer kwargs and retry."""
+    import streamlit as st
+    try:
+        return st.button(label, **kwargs)
+    except TypeError:
+        # remove kwargs not supported in older Streamlit
+        kwargs.pop("type", None)
+        kwargs.pop("use_container_width", None)
+        return st.button(label, **kwargs)
+
+def safe_download_button(label, data=None, **kwargs):
+    """Same idea for st.download_button (older versions lack use_container_width)."""
+    import streamlit as st
+    try:
+        return st.download_button(label, data=data, **kwargs)
+    except TypeError:
+        kwargs.pop("use_container_width", None)
+        return st.download_button(label, data=data, **kwargs)
 
 # ---- Page Setup ----
 st.set_page_config(
@@ -284,7 +304,8 @@ with st.expander("Advanced settings"):
     do_nonlinear = st.checkbox("Make UMAP/t-SNE (if available)", value=True)
 
 # ---------------- Run ----------------
-run = st.button("🚀 Run Harmonization", type="primary", use_column_width=True)
+run = safe_button("🚀 Run Harmonization", type="primary", use_container_width=True)
+
 
 if run:
     if not metadata_file:
@@ -507,3 +528,4 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
