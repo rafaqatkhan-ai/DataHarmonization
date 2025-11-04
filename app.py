@@ -42,11 +42,13 @@ st.set_page_config(
     layout="wide",
 )
 
-# Init session state (used later by tabs)
+# Init session state (used across tabs)
 if "run_id" not in st.session_state:
     st.session_state.run_id = None
 if "out" not in st.session_state:
     st.session_state.out = None
+if "run_token" not in st.session_state:
+    st.session_state.run_token = None  # forces widget re-render per run
 
 # =========================
 # THEME SELECTOR (non-black)
@@ -59,7 +61,6 @@ theme = st.selectbox(
 )
 
 def apply_theme(t: str):
-    # Each theme block uses !important to override any earlier CSS.
     if t == "Light Gray":
         css = """
         <style>
@@ -274,7 +275,7 @@ if run:
         "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip()],
         "metadata_group_cols": [c.strip() for c in grp_cols.split(",") if c.strip()],
         "metadata_batch_col": (batch_col.strip() or None),
-        "out_root": out_dir,  # replaced below with timestamped subfolder
+        "out_root": out_dir,  # replaced below with a timestamped subfolder
         "pca_topk_features": int(pca_topk),
         "make_nonlinear": do_nonlinear,
     }
@@ -309,16 +310,15 @@ if run:
     # ---- Run pipeline with timestamped out_root ----
     try:
         with st.spinner("Running harmonization..."):
-            # Unique run folder
             run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
             kwargs["out_root"] = os.path.join(out_dir, run_id)
 
-            # Execute
             out = run_pipeline(**kwargs)
 
-            # Persist current run
+            # Persist current run + a fresh token to break widget caches
             st.session_state.run_id = run_id
             st.session_state.out = out
+            st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
 
     except Exception as e:
         st.error(f"Run failed: {e}")
@@ -361,7 +361,7 @@ if run:
     with kcol4:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
         sil_batch = qc.get("silhouette_batch", None)
-        st.metric("Silhouette (batch)", f'{sil_batch:.2f}' if isinstance(sil_batch, (int,float)) else "—")
+        st.metric("Silhouette (batch)", f'{sil_batch:.2f}' if isinstance(sil_batch, (int, float)) else "—")
         st.markdown('<div class="smallcaps">Lower is better</div></div>', unsafe_allow_html=True)
 
     tabs = st.tabs(["Overview", "QC", "PCA & Embeddings", "DE & GSEA", "Outliers", "Files"])
@@ -452,47 +452,52 @@ if run:
 
     # ---- Outliers
     with tabs[4]:
-        # Always reference the latest run
-        out_curr = st.session_state.get("out") or out
-        try:
+        if not st.session_state.out:
+            st.info("No run loaded yet. Please run the pipeline.")
+        else:
+            out_curr = st.session_state.out
             outliers_path = os.path.join(out_curr["outdir"], "outliers.tsv")
             meta_path = os.path.join(out_curr["outdir"], "metadata.tsv")
 
+            st.caption(f"Run: **{st.session_state.run_id}**  •  Outdir: `{out_curr['outdir']}`")
+
             if os.path.exists(outliers_path):
-                df = pd.read_csv(outliers_path, sep="\t", index_col=0)
+                mtime = int(os.path.getmtime(outliers_path))
+                try:
+                    df = pd.read_csv(outliers_path, sep="\t", index_col=0)
 
-                # Join metadata for readability if available
-                if os.path.exists(meta_path):
-                    meta_df = pd.read_csv(meta_path, sep="\t", index_col=0)
-                    display_df = (
-                        df.copy()
-                        .assign(sample=df.index)
-                        .join(meta_df[["bare_id", "group"]], how="left")
-                        .set_index("sample")
-                        .rename(columns={"IsolationForest": "IsolationForest_flag", "LOF": "LOF_flag"})
-                        [["bare_id", "group", "IsolationForest_flag", "LOF_flag"]]
+                    if os.path.exists(meta_path):
+                        meta_df = pd.read_csv(meta_path, sep="\t", index_col=0)
+                        display_df = (
+                            df.copy()
+                            .assign(sample=df.index)
+                            .join(meta_df[["bare_id", "group"]], how="left")
+                            .set_index("sample")
+                            .rename(columns={"IsolationForest": "IsolationForest_flag", "LOF": "LOF_flag"})
+                            [["bare_id", "group", "IsolationForest_flag", "LOF_flag"]]
+                        )
+                    else:
+                        display_df = df
+
+                    st.write("### Outlier flags (1 = outlier)")
+                    st.dataframe(
+                        display_df,
+                        use_container_width=True,
+                        key=f"outliers_df__{st.session_state.run_token}__{mtime}",
                     )
-                else:
-                    display_df = df
 
-                st.write("### Outlier flags (1 = outlier)")
-                st.dataframe(
-                    display_df,
-                    use_container_width=True,
-                    key=f"outliers_df_{st.session_state.get('run_id','noid')}",
-                )
-
-                with open(outliers_path, "rb") as fh:
-                    safe_download_button(
-                        "⬇️ Download outlier table",
-                        fh.read(),
-                        file_name="outliers.tsv",
-                        mime="text/tab-separated-values",
-                    )
+                    with open(outliers_path, "rb") as fh:
+                        safe_download_button(
+                            "⬇️ Download outlier table",
+                            fh.read(),
+                            file_name="outliers.tsv",
+                            mime="text/tab-separated-values",
+                            key=f"dl_outliers__{st.session_state.run_token}__{mtime}",
+                        )
+                except Exception as e:
+                    st.warning(f"Could not load outliers for this run: {e}")
             else:
                 st.info("No outlier table found for this run.")
-        except Exception as e:
-            st.warning(f"Could not load outliers for this run: {e}")
 
     # ---- Files
     with tabs[5]:
