@@ -545,9 +545,7 @@ if run:
                             "IsolationForest": "IsolationForest_flag",
                             "LOF": "LOF_flag",
                         }
-                    )[
-                        ["bare_id", "group", "IsolationForest_flag", "LOF_flag"]
-                    ]
+                    )[["bare_id", "group", "IsolationForest_flag", "LOF_flag"]]
                 )
             else:
                 display_df = df
@@ -570,6 +568,7 @@ if run:
             st.info("No outlier table found for this run.")
     except Exception as e:
         st.warning(f"Could not load outliers for this run: {e}")
+
 
     # ---- Files
     with tabs[5]:
@@ -603,6 +602,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
