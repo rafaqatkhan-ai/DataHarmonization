@@ -3,26 +3,26 @@ import os, io, tempfile, shutil, json
 import streamlit as st
 import pandas as pd
 from harmonizer import run_pipeline
-# --- Streamlit compatibility shims (handle older versions that lack certain kwargs) ---
+# --- Streamlit compatibility shims (older versions may not support some kwargs) ---
 def safe_button(label, **kwargs):
-    """Try modern st.button signature; on TypeError, drop newer kwargs and retry."""
     import streamlit as st
     try:
         return st.button(label, **kwargs)
     except TypeError:
-        # remove kwargs not supported in older Streamlit
         kwargs.pop("type", None)
         kwargs.pop("use_container_width", None)
         return st.button(label, **kwargs)
 
 def safe_download_button(label, data=None, **kwargs):
-    """Same idea for st.download_button (older versions lack use_container_width)."""
     import streamlit as st
     try:
-        return st.download_button(label, data=data, **kwargs)
+        return safe_download_button(label, data=data, **kwargs)
     except TypeError:
+        # Drop newer args for old Streamlit
         kwargs.pop("use_container_width", None)
-        return st.download_button(label, data=data, **kwargs)
+        # Some very old versions are picky about positional args, so force keyword
+        return safe_download_button(label=label, data=data, **kwargs)
+
 
 # ---- Page Setup ----
 st.set_page_config(
@@ -307,6 +307,7 @@ with st.expander("Advanced settings"):
 run = safe_button("🚀 Run Harmonization", type="primary", use_container_width=True)
 
 
+
 if run:
     if not metadata_file:
         st.error("Please upload a metadata file.")
@@ -469,7 +470,7 @@ if run:
                 df = pd.read_csv(tsv, sep="\t", index_col=0).head(50)
                 st.dataframe(df, use_container_width=True)
                 with open(tsv, "rb") as fh:
-                    st.download_button("⬇️ Download full DE table", fh.read(), file_name=f"DE_{pick}.tsv", mime="text/tab-separated-values")
+                    safe_download_button("⬇️ Download full DE table", fh.read(), file_name=f"DE_{pick}.tsv", mime="text/tab-separated-values")
             except Exception:
                 pass
         # GSEA if any
@@ -492,7 +493,7 @@ if run:
             st.write("### Outlier flags (1 = outlier)")
             st.dataframe(df, use_container_width=True)
             with open(os.path.join(out["outdir"], "outliers.tsv"), "rb") as fh:
-                st.download_button("⬇️ Download outlier table", fh.read(), file_name="outliers.tsv", mime="text/tab-separated-values")
+                safe_download_button("⬇️ Download outlier table", fh.read(), file_name="outliers.tsv", mime="text/tab-separated-values")
         except Exception:
             st.info("No outlier table found.")
 
@@ -511,11 +512,11 @@ if run:
             for label, path in core_files:
                 if os.path.exists(path):
                     with open(path, "rb") as fh:
-                        st.download_button(f"⬇️ {label}", fh.read(), file_name=os.path.basename(path), mime="text/plain", use_column_width=True)
+                        safe_download_button(f"⬇️ {label}", fh.read(), file_name=os.path.basename(path), mime="text/plain", use_column_width=True)
         with colB:
             try:
                 with open(out["zip"], "rb") as fh:
-                    st.download_button(
+                    safe_download_button(
                         label="⬇️ Download ALL results (ZIP)",
                         data=fh.read(),
                         file_name="harmonization_results.zip",
@@ -528,4 +529,5 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
