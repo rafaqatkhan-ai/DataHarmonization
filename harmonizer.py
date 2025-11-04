@@ -537,6 +537,11 @@ def create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, figdir: st
 
 
 def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization_mode):
+    # ensure both sources are canonical before plotting
+    meta = meta.copy()
+    meta["group"] = meta["group"].apply(normalize_group_value)
+    pca_df = pca_df.copy()
+    pca_df["group"] = pca_df["group"].apply(normalize_group_value)
     groups = list(pd.unique(meta['group'].astype(str)))
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     # PC1 vs PC2 by group
@@ -981,6 +986,8 @@ def run_pipeline(
 
     # 7) PCA (fail-soft if not enough variation or samples)
     pca_df = pd.DataFrame(index=expr_harmonized.columns)
+    meta["group"] = meta["group"].apply(normalize_group_value)
+    pca_df["group"] = pca_df["group"].apply(normalize_group_value)
     kpi = {}
     pca_skipped_reason = None
     try:
@@ -1025,10 +1032,12 @@ def run_pipeline(
     # 9) Outliers
     outliers = detect_outliers(expr_log2); outliers.to_csv(os.path.join(OUTDIR, "outliers.tsv"), sep="\t")
 
-    # 10) DE (group contrasts) – this will auto-skip contrasts without ≥2 per group
+    # 10) DE (group contrasts)
+    meta["group"] = meta["group"].apply(normalize_group_value)   # <- ensure canonical
     groups = [g for g in pd.unique(meta["group"].astype(str)) if g and g == g]
-    default_contrasts = [(a,b) for a in groups for b in groups if a!=b]
+    default_contrasts = [(a, b) for a in groups for b in groups if a != b]
     default_contrasts = [c for c in default_contrasts if not ("ALL" in c)]
+
     de = differential_expression(expr_log2, meta, default_contrasts)
     de_dir = os.path.join(OUTDIR, "de"); os.makedirs(de_dir, exist_ok=True)
     for k, df in de.items():
@@ -1085,6 +1094,7 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
 
 
 
