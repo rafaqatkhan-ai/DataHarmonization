@@ -522,9 +522,11 @@ if run:
                         pass
     # ---- Outliers
     # ---- Outliers
-    with tabs[4]:
+# ---- Outliers
+with tabs[4]:
     # Always reference the latest run
     out_curr = st.session_state.get("out") or out
+
     try:
         outliers_path = os.path.join(out_curr["outdir"], "outliers.tsv")
         meta_path = os.path.join(out_curr["outdir"], "metadata.tsv")
@@ -564,10 +566,13 @@ if run:
                     file_name="outliers.tsv",
                     mime="text/tab-separated-values",
                 )
+
         else:
             st.info("No outlier table found for this run.")
+
     except Exception as e:
         st.warning(f"Could not load outliers for this run: {e}")
+
 
 
     # ---- Files
@@ -602,6 +607,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
