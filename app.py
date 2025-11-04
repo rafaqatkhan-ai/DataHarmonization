@@ -1,11 +1,14 @@
-# app.py (generalized for single- or multi-file, with PCA fail-soft messaging)
+# app.py — fixed to prevent stale "Outliers" table (run-scoped keys + cache clearing)
+
 import os, io, tempfile, shutil, json
 import streamlit as st
 import pandas as pd
 from harmonizer import run_pipeline
 import datetime as _dt
 
-# --- Streamlit compatibility shims (older versions may not support some kwargs) ---
+# =========================
+# Streamlit compatibility shims
+# =========================
 def safe_button(label, **kwargs):
     try:
         return st.button(label, **kwargs)
@@ -35,7 +38,9 @@ def safe_download_button(label, data=None, **kwargs):
             kwargs.pop("key", None)
             return st.download_button(label=label, data=data)
 
-# ---- Page Setup ----
+# =========================
+# Page Setup
+# =========================
 st.set_page_config(
     page_title="🧬 Data Harmonization & QC Suite",
     page_icon="🧬",
@@ -320,6 +325,13 @@ if run:
             st.session_state.out = out
             st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
 
+            # >>> IMPORTANT: Clear caches so no old DataFrames/objects linger
+            try:
+                st.cache_data.clear()
+                st.cache_resource.clear()
+            except Exception:
+                pass
+
     except Exception as e:
         st.error(f"Run failed: {e}")
         if gmt_file:
@@ -433,9 +445,15 @@ if run:
             tsv = os.path.join(de_dir, f"DE_{pick}.tsv")
             try:
                 df = pd.read_csv(tsv, sep="\t", index_col=0).head(50)
-                st.dataframe(df, use_container_width=True)
+                st.dataframe(df, use_container_width=True, key=f"de_table__{st.session_state.run_id}__{pick}")
                 with open(tsv, "rb") as fh:
-                    safe_download_button("⬇️ Download full DE table", fh.read(), file_name=f"DE_{pick}.tsv", mime="text/tab-separated-values")
+                    safe_download_button(
+                        "⬇️ Download full DE table",
+                        fh.read(),
+                        file_name=f"DE_{pick}.tsv",
+                        mime="text/tab-separated-values",
+                        key=f"dl_de__{st.session_state.run_id}__{pick}",
+                    )
             except Exception:
                 pass
         gsea_dir = os.path.join(out["outdir"], "gsea")
@@ -446,12 +464,11 @@ if run:
                     st.write(f)
                     try:
                         df = pd.read_csv(os.path.join(gsea_dir, f), sep="\t").head(30)
-                        st.dataframe(df, use_container_width=True)
+                        st.dataframe(df, use_container_width=True, key=f"gsea_{st.session_state.run_id}__{f}")
                     except Exception:
                         pass
 
-    # ---- Outliers
-    # ---- Outliers
+    # ---- Outliers (FIXED)
     with tabs[4]:
         if not st.session_state.out:
             st.info("No run loaded yet. Please run the pipeline.")
@@ -464,6 +481,8 @@ if run:
 
             if os.path.exists(outliers_path):
                 mtime = int(os.path.getmtime(outliers_path))
+                cache_buster = f"{st.session_state.run_id}__{mtime}"
+
                 try:
                     df = pd.read_csv(outliers_path, sep="\t", index_col=0)
 
@@ -476,8 +495,7 @@ if run:
                             df.copy()
                             .assign(sample=df.index)
                             .join(
-                                meta_df[["bare_id", grp_col]]
-                                    .rename(columns={grp_col: "group"}),
+                                meta_df[["bare_id", grp_col]].rename(columns={grp_col: "group"}),
                                 how="left"
                             )
                             .set_index("sample")
@@ -487,13 +505,17 @@ if run:
                             })[["bare_id", "group", "IsolationForest_flag", "LOF_flag"]]
                         )
                     else:
-                        display_df = df
+                        # Fallback to whatever the outliers.tsv provided
+                        display_df = df.rename(columns={
+                            "IsolationForest": "IsolationForest_flag",
+                            "LOF": "LOF_flag",
+                        })
 
                     st.write("### Outlier flags (1 = outlier)")
                     st.dataframe(
                         display_df,
                         use_container_width=True,
-                        key=f"outliers_df__{st.session_state.run_token}__{mtime}",
+                        key=f"outliers_df__{cache_buster}",
                     )
 
                     with open(outliers_path, "rb") as fh:
@@ -502,13 +524,12 @@ if run:
                             fh.read(),
                             file_name="outliers.tsv",
                             mime="text/tab-separated-values",
-                            key=f"dl_outliers__{st.session_state.run_token}__{mtime}",
+                            key=f"dl_outliers__{cache_buster}",
                         )
                 except Exception as e:
                     st.warning(f"Could not load outliers for this run: {e}")
             else:
                 st.info("No outlier table found for this run.")
-
 
     # ---- Files
     with tabs[5]:
@@ -525,7 +546,14 @@ if run:
             for label, path in core_files:
                 if os.path.exists(path):
                     with open(path, "rb") as fh:
-                        safe_download_button(f"⬇️ {label}", fh.read(), file_name=os.path.basename(path), mime="text/plain", use_container_width=True)
+                        safe_download_button(
+                            f"⬇️ {label}",
+                            fh.read(),
+                            file_name=os.path.basename(path),
+                            mime="text/plain",
+                            use_container_width=True,
+                            key=f"dl_core__{st.session_state.run_id}__{label}",
+                        )
         with colB:
             try:
                 with open(out["zip"], "rb") as fh:
@@ -535,6 +563,7 @@ if run:
                         file_name="harmonization_results.zip",
                         mime="application/zip",
                         use_container_width=True,
+                        key=f"dl_zip__{st.session_state.run_id}",
                     )
             except Exception as e:
                 st.warning(f"Could not open ZIP for download: {e}")
@@ -542,4 +571,3 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
-
