@@ -1,4 +1,4 @@
-# app.py (generalized for single- or multi-file)
+# app.py (generalized for single- or multi-file, with PCA fail-soft messaging)
 import os, io, tempfile, shutil, json
 import streamlit as st
 import pandas as pd
@@ -41,7 +41,6 @@ def apply_theme(t: str):
             box-shadow:0 4px 10px rgba(37,99,235,.25) !important;
         }
 
-        /* --- Increased tab width --- */
         .stTabs [data-baseweb="tab-list"]{ gap:16px !important; }
         .stTabs [data-baseweb="tab"]{
             background:#e9f0fa !important; color:#1e3a8a !important; border:1px solid #cbd5e1 !important;
@@ -77,7 +76,6 @@ def apply_theme(t: str):
             box-shadow:0 4px 10px rgba(16,185,129,.25) !important;
         }
 
-        /* --- Increased tab width --- */
         .stTabs [data-baseweb="tab-list"]{ gap:16px !important; }
         .stTabs [data-baseweb="tab"]{
             background:#fff7ed !important; color:#7c2d12 !important; border:1px solid #fed7aa !important;
@@ -112,7 +110,6 @@ def apply_theme(t: str):
             box-shadow:0 4px 12px rgba(34,211,238,.35) !important;
         }
 
-        /* --- Increased tab width --- */
         .stTabs [data-baseweb="tab-list"]{ gap:16px !important; }
         .stTabs [data-baseweb="tab"]{
             background:#111827 !important; color:#cbd5e1 !important; border:1px solid #1f2937 !important;
@@ -132,7 +129,7 @@ def apply_theme(t: str):
     else:  # "Slate Blue"
         css = """
         <style>
-        [data-testid="stAppViewContainer"] { background:#0f172a !important; color:#e2e8f0 !important; } /* slate-900 */
+        [data-testid="stAppViewContainer"] { background:#0f172a !important; color:#e2e8f0 !important; }
         [data-testid="stSidebar"] { background:#111827 !important; border-right:1px solid #1f2937 !important; }
         [data-testid="stVerticalBlock"] { background:#0b1220 !important; border-radius:12px !important; padding:1rem !important; margin-bottom:1rem !important; box-shadow:0 2px 10px rgba(2,6,23,.6) !important; }
 
@@ -147,7 +144,6 @@ def apply_theme(t: str):
             box-shadow:0 4px 12px rgba(129,140,248,.35) !important;
         }
 
-        /* --- Increased tab width --- */
         .stTabs [data-baseweb="tab-list"]{ gap:16px !important; }
         .stTabs [data-baseweb="tab"]{
             background:#111827 !important; color:#cbd5e1 !important; border:1px solid #1f2937 !important;
@@ -166,17 +162,10 @@ def apply_theme(t: str):
         """
     st.markdown(css, unsafe_allow_html=True)
 
-# (Inject theme CSS LAST so it overrides everything)
 apply_theme(theme)
 
 # =========================
-# TITLE (kept separate)
-# =========================
-# (the rest of your code remains identical)
-
-
-# =========================
-# TITLE (kept separate)
+# TITLE
 # =========================
 st.markdown(
     """
@@ -295,7 +284,7 @@ with st.expander("Advanced settings"):
     do_nonlinear = st.checkbox("Make UMAP/t-SNE (if available)", value=True)
 
 # ---------------- Run ----------------
-run = st.button("🚀 Run Harmonization", type="primary", use_container_width=True)
+run = st.button("🚀 Run Harmonization", type="primary", use_column_width=True)
 
 if run:
     if not metadata_file:
@@ -306,7 +295,7 @@ if run:
     kwargs = {
         "metadata_file": io.BytesIO(metadata_file.getvalue()),
         "metadata_name_hint": metadata_file.name,
-        "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip()],
+        "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip() ],
         "metadata_group_cols": [c.strip() for c in grp_cols.split(",") if c.strip()],
         "metadata_batch_col": (batch_col.strip() or None),
         "out_root": out_dir,
@@ -348,18 +337,21 @@ if run:
             shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
         st.stop()
 
-    st.success("Done!")
-
-    # ------- UI: Results Tabs -------
-    st.subheader("Results")
-
-    # Load report for KPIs
+    # Load report for KPIs *immediately* so we can show any warnings
     report = {}
     try:
         with open(out["report_json"], "r") as fh:
             report = json.load(fh)
     except Exception:
         pass
+
+    # Show success, then a gentle warning if PCA was skipped
+    st.success("Done!")
+    if report.get("notes", {}).get("pca_skipped_reason"):
+        st.warning("PCA/UMAP skipped: " + str(report["notes"]["pca_skipped_reason"]))
+
+    # ------- UI: Results Tabs -------
+    st.subheader("Results")
 
     # KPI Cards
     kcol1, kcol2, kcol3, kcol4 = st.columns(4)
@@ -432,7 +424,8 @@ if run:
         for f in pcs:
             p = os.path.join(fig_dir, f)
             if os.path.exists(p):
-                st.image(p, caption=f, use_column_width=True)
+                st.image(p, caption=os.path.basename(p), use_column_width=True)
+        # If nothing exists, the warning above already explains why.
 
     # ---- DE & GSEA
     with tabs[3]:
@@ -497,7 +490,7 @@ if run:
             for label, path in core_files:
                 if os.path.exists(path):
                     with open(path, "rb") as fh:
-                        st.download_button(f"⬇️ {label}", fh.read(), file_name=os.path.basename(path), mime="text/plain", use_container_width=True)
+                        st.download_button(f"⬇️ {label}", fh.read(), file_name=os.path.basename(path), mime="text/plain", use_column_width=True)
         with colB:
             try:
                 with open(out["zip"], "rb") as fh:
@@ -506,7 +499,7 @@ if run:
                         data=fh.read(),
                         file_name="harmonization_results.zip",
                         mime="application/zip",
-                        use_container_width=True,
+                        use_column_width=True,
                     )
             except Exception as e:
                 st.warning(f"Could not open ZIP for download: {e}")
@@ -514,6 +507,3 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
-
-
-
