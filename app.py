@@ -4,11 +4,13 @@ import streamlit as st
 import pandas as pd
 from harmonizer import run_pipeline
 # --- Streamlit compatibility shims (older versions may not support some kwargs) ---
+# --- Streamlit compatibility shims (older versions may not support some kwargs) ---
 def safe_button(label, **kwargs):
     import streamlit as st
     try:
         return st.button(label, **kwargs)
     except TypeError:
+        # Drop newer kwargs and retry
         kwargs.pop("type", None)
         kwargs.pop("use_container_width", None)
         return st.button(label, **kwargs)
@@ -16,13 +18,12 @@ def safe_button(label, **kwargs):
 def safe_download_button(label, data=None, **kwargs):
     import streamlit as st
     try:
-        return safe_download_button(label, data=data, **kwargs)
+        # Always call with keywords to avoid very-old positional quirks
+        return st.download_button(label=label, data=data, **kwargs)
     except TypeError:
-        # Drop newer args for old Streamlit
+        # Drop newer/iffy kwargs and retry the REAL widget (not this shim!)
         kwargs.pop("use_container_width", None)
-        # Some very old versions are picky about positional args, so force keyword
-        return safe_download_button(label=label, data=data, **kwargs)
-
+        return st.download_button(label=label, data=data, **kwargs)
 
 # ---- Page Setup ----
 st.set_page_config(
@@ -306,8 +307,6 @@ with st.expander("Advanced settings"):
 # ---------------- Run ----------------
 run = safe_button("🚀 Run Harmonization", type="primary", use_container_width=True)
 
-
-
 if run:
     if not metadata_file:
         st.error("Please upload a metadata file.")
@@ -529,5 +528,6 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
