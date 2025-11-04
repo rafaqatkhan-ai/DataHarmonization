@@ -451,6 +451,7 @@ if run:
                         pass
 
     # ---- Outliers
+    # ---- Outliers
     with tabs[4]:
         if not st.session_state.out:
             st.info("No run loaded yet. Please run the pipeline.")
@@ -466,15 +467,24 @@ if run:
                 try:
                     df = pd.read_csv(outliers_path, sep="\t", index_col=0)
 
+                    # Prefer original dataset labels if available
                     if os.path.exists(meta_path):
                         meta_df = pd.read_csv(meta_path, sep="\t", index_col=0)
+                        grp_col = "group_raw" if "group_raw" in meta_df.columns else "group"
+
                         display_df = (
                             df.copy()
                             .assign(sample=df.index)
-                            .join(meta_df[["bare_id", "group"]], how="left")
+                            .join(
+                                meta_df[["bare_id", grp_col]]
+                                    .rename(columns={grp_col: "group"}),
+                                how="left"
+                            )
                             .set_index("sample")
-                            .rename(columns={"IsolationForest": "IsolationForest_flag", "LOF": "LOF_flag"})
-                            [["bare_id", "group", "IsolationForest_flag", "LOF_flag"]]
+                            .rename(columns={
+                                "IsolationForest": "IsolationForest_flag",
+                                "LOF": "LOF_flag",
+                            })[["bare_id", "group", "IsolationForest_flag", "LOF_flag"]]
                         )
                     else:
                         display_df = df
@@ -498,6 +508,7 @@ if run:
                     st.warning(f"Could not load outliers for this run: {e}")
             else:
                 st.info("No outlier table found for this run.")
+
 
     # ---- Files
     with tabs[5]:
@@ -531,3 +542,4 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
