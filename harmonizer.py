@@ -77,7 +77,32 @@ VAR_EPS = 1e-12
 
 HOUSEKEEPING_GENES = ["ACTB","GAPDH","RPLP0","B2M","HPRT1","PGK1","TBP","GUSB"]
 SEX_MARKERS = {"female":["XIST"], "male":["RPS4Y1","KDM5D","UTY"]}
+# -------- Group normalization helper --------
+def normalize_group_value(x: str) -> str | None:
+    """
+    Standardize group labels by ignoring capitalization and spacing.
+    Example: 'disease', 'Disease', 'DISEASE' → 'Disease'
+             'control', 'Control', 'CONTROL' → 'Control'
+    """
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return None
 
+    s = str(x).strip().lower()
+    s = s.replace("_", "").replace("-", "").replace(" ", "")
+
+    if s in {"disease", "diseased", "case", "patient"}:
+        return "Disease"
+    elif s in {"control", "ctrl", "healthy", "normal"}:
+        return "Control"
+    elif s in {"hpvpos", "hpvpositive", "hpv+"}:
+        return "HPV_Pos"
+    elif s in {"hpvneg", "hpvnegative", "hpv-"}:
+        return "HPV_Neg"
+    elif s in {"atypia", "precancer"}:
+        return "Atypia"
+    else:
+        # Fallback — Title Case for consistent readability
+        return str(x).strip().capitalize()
 # ---------------- Utilities ----------------
 def roman_to_int(s: str) -> Optional[int]:
     if not isinstance(s, str):
@@ -896,7 +921,10 @@ def run_pipeline(
         if extra in m_align.columns:
             meta[extra] = m_align[extra].reindex(meta["bare_id"]).values
             keep.append(extra)
-    meta = meta[keep]
+    meta["group_raw"] = meta["group"]
+    meta["group"] = meta["group"].apply(normalize_group_value)
+
+    # meta = meta[keep]
 
     # >>> CRITICAL: ensure meta index is unique before any reindex/join <<<
     if meta.index.duplicated().any():
@@ -1057,5 +1085,6 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
 
 
