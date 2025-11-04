@@ -318,6 +318,7 @@ with st.expander("Advanced settings"):
     do_nonlinear = st.checkbox("Make UMAP/t-SNE (if available)", value=True)
 
 # ---------------- Run ----------------
+# ---------------- Run ----------------
 run = safe_button("🚀 Run Harmonization", type="primary", use_container_width=True)
 
 if run:
@@ -325,18 +326,19 @@ if run:
         st.error("Please upload a metadata file.")
         st.stop()
 
-    # Build inputs for pipeline
+    # ---- Build kwargs for the pipeline ----
     kwargs = {
         "metadata_file": io.BytesIO(metadata_file.getvalue()),
         "metadata_name_hint": metadata_file.name,
-        "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip() ],
+        "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip()],
         "metadata_group_cols": [c.strip() for c in grp_cols.split(",") if c.strip()],
         "metadata_batch_col": (batch_col.strip() or None),
-        "out_root": out_dir,
+        "out_root": out_dir,                    # will be replaced by timestamped subfolder below
         "pca_topk_features": int(pca_topk),
         "make_nonlinear": do_nonlinear,
     }
 
+    # Optional GSEA GMT
     gmt_path = None
     if gmt_file:
         tmpdir = tempfile.mkdtemp()
@@ -345,13 +347,14 @@ if run:
             fh.write(gmt_file.getvalue())
         kwargs["gsea_gmt"] = gmt_path
 
+    # Expression inputs
     if mode == "Multiple files (one per group)":
         groups = {}
         if normal_file: groups["Normal"] = io.BytesIO(normal_file.getvalue())
         if atypia_file: groups["Atypia"] = io.BytesIO(atypia_file.getvalue())
         if hpv_pos_file: groups["HPV_Pos"] = io.BytesIO(hpv_pos_file.getvalue())
         if hpv_neg_file: groups["HPV_Neg"] = io.BytesIO(hpv_neg_file.getvalue())
-        if len(groups) == 0:
+        if not groups:
             st.error("Please upload at least one expression file.")
             st.stop()
         kwargs["group_to_file"] = groups
@@ -362,39 +365,41 @@ if run:
         kwargs["single_expression_file"] = io.BytesIO(single_expr_file.getvalue())
         kwargs["single_expression_name_hint"] = single_expr_file.name
 
-try:
-    with st.spinner("Running harmonization..."):
-        # --- Initialize session state (top of app or before run_pipeline) ---
-        if "run_id" not in st.session_state:
-            st.session_state.run_id = None
-        if "out" not in st.session_state:
-            st.session_state.out = None
+    # ---- Run pipeline with timestamped out_root ----
+    try:
+        with st.spinner("Running harmonization..."):
+            # Initialize session state
+            if "run_id" not in st.session_state:
+                st.session_state.run_id = None
+            if "out" not in st.session_state:
+                st.session_state.out = None
 
-        # --- Create unique run ID and set output directory ---
-        import datetime as _dt
-        run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
-        kwargs["out_root"] = os.path.join(out_dir, run_id)
+            # Unique run folder
+            import datetime as _dt
+            run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
+            kwargs["out_root"] = os.path.join(out_dir, run_id)
 
-        # --- Run the harmonization pipeline ---
-        out = run_pipeline(**kwargs)
+            # Execute
+            out = run_pipeline(**kwargs)
 
-        # --- Persist current run in Streamlit session state ---
-        st.session_state.run_id = run_id
-        st.session_state.out = out
+            # Persist current run
+            st.session_state.run_id = run_id
+            st.session_state.out = out
 
-except Exception as e:
-    st.error(f"Run failed: {e}")
-    if gmt_file:
-        shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
-    st.stop()
+    except Exception as e:
+        st.error(f"Run failed: {e}")
+        if gmt_file:
+            shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+        st.stop()
 
-# --- Load report for KPIs (after successful run) ---
-report = {}
-try:
-    with open(out["report_json"], "r") as fh:
-        report = json.load(fh)
-except Exception:
-    pass
+    # ---- Load report for KPIs ----
+    report = {}
+    try:
+        with open(out["report_json"], "r") as fh:
+            report = json.load(fh)
+    except Exception:
+        pass
+
 
 
     # Show success, then a gentle warning if PCA was skipped
@@ -559,6 +564,7 @@ except Exception:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
