@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# harmonizer.py (generalized)
+# harmonizer.py (generalized, fail-soft PCA)
 # End-to-end pipeline: batch harmonization + QC + DE + optional GSEA
 import os, re, io, json, warnings, zipfile
 from typing import Dict, Tuple, List, Iterable, Optional
@@ -161,15 +161,10 @@ def read_expression_any(bytes_or_path, name_hint: Optional[str] = None, group_na
 
 
 def read_expression_xlsx(bytes_or_path, group_name: str) -> pd.DataFrame:
-    # kept for backward-compat; now uses the generalized reader
     return read_expression_any(bytes_or_path, name_hint=str(bytes_or_path), group_name=group_name)
 
 
 def build_metadata_from_columns(columns: List[str], groups_from_prefix: bool = True) -> pd.DataFrame:
-    """
-    Build basic metadata from sample column names. If groups_from_prefix is True,
-    looks for the pattern "<group>__<sample>" and extracts group; otherwise sets group="ALL".
-    """
     idx = pd.Index(columns, name="sample")
     if groups_from_prefix and any("__" in c for c in columns):
         df = pd.DataFrame({
@@ -215,15 +210,37 @@ def drop_zero_variance(X):
 
 
 def safe_matrix_for_pca(matrix, topk: int = 5000):
-    X = matrix.copy().apply(pd.to_numeric, errors="coerce").astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    var = X.var(axis=1, ddof=1)
+    """
+    Make a samples x features matrix safe for PCA.
+
+    Fail-soft improvements:
+    - Use ddof=0 when <2 samples (avoids all-NaN var).
+    - Secondary check with MAD in case variance is numerically 0.
+    - Raise a descriptive RuntimeError if still no variability.
+    """
+    X = (matrix.copy()
+         .apply(pd.to_numeric, errors="coerce")
+         .astype(float)
+         .replace([np.inf, -np.inf], np.nan)
+         .fillna(0.0))
+    ddof = 0 if X.shape[1] < 2 else 1
+    var = X.var(axis=1, ddof=ddof).fillna(0.0)
+
     nz = var > VAR_EPS
     if not nz.any():
-        raise RuntimeError("No non-zero-variance features for PCA.")
+        # Try MAD as a fallback variability detector
+        med = X.median(axis=1)
+        mad = (X.sub(med, axis=0).abs()).median(axis=1)
+        nz = mad > 0
+
+    if not nz.any():
+        raise RuntimeError("No non-zero-variance features for PCA. Ensure ≥2 samples and some inter-sample variation.")
+
     if topk and nz.sum() > topk:
         X = X.loc[var.loc[nz].nlargest(topk).index]
     else:
         X = X.loc[nz]
+
     X = X.T
     X.columns = X.columns.map(str)
     return X
@@ -251,7 +268,13 @@ def detect_data_type_and_platform(X: pd.DataFrame) -> Tuple[str, str, Dict]:
     diags = {"zero_fraction": zero_frac, "value_range_approx": rng}
     return data_type, platform, diags
 
-# ---------- Robust metadata reader (BytesIO/paths; Excel/CSV/TSV) ----------
+# ---------- Robust metadata reader ----------
+
+def _as_bytesio_seekable(x):
+    bio = _as_bytesio(x)
+    if bio is not None:
+        bio.seek(0)
+    return bio
 
 def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFrame:
     """
@@ -286,25 +309,25 @@ def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFra
         if is_pathlike:
             return pd.read_excel(metadata_obj, engine="openpyxl")
         else:
-            bio = _as_bytesio(metadata_obj)
+            bio = _as_bytesio_seekable(metadata_obj)
             return pd.read_excel(bio, engine="openpyxl")
     elif suffix in (".tsv", ".txt"):
         if is_pathlike:
             return pd.read_csv(metadata_obj, sep="\t")
         else:
-            bio = _as_bytesio(metadata_obj); bio.seek(0)
+            bio = _as_bytesio_seekable(metadata_obj)
             return pd.read_csv(bio, sep="\t")
     elif suffix == ".csv":
         if is_pathlike:
             return pd.read_csv(metadata_obj)
         else:
-            bio = _as_bytesio(metadata_obj); bio.seek(0)
+            bio = _as_bytesio_seekable(metadata_obj)
             return pd.read_csv(bio)
 
     if is_pathlike:
         return _try_excel_then_csv(metadata_obj)
     else:
-        bio = _as_bytesio(metadata_obj)
+        bio = _as_bytesio_seekable(metadata_obj)
         return _try_excel_then_csv(bio)
 
 # ---------------- Batch harmonization ----------------
@@ -387,7 +410,6 @@ def plot_housekeeping_stability(expr_log2, figdir: str) -> Optional[str]:
     p = os.path.join(figdir, "hk_cv.png"); _savefig(p); return p
 
 def plot_sex_marker_check(expr_log2, meta, figdir: str) -> Optional[str]:
-    # average markers
     f_mark = [g for g in SEX_MARKERS["female"] if g in expr_log2.index.astype(str)]
     m_mark = [g for g in SEX_MARKERS["male"] if g in expr_log2.index.astype(str)]
     if not f_mark and not m_mark: return None
@@ -397,13 +419,11 @@ def plot_sex_marker_check(expr_log2, meta, figdir: str) -> Optional[str]:
     plt.scatter(mal.values, fem.values, s=40, alpha=0.8)
     plt.xlabel("Male markers (avg log2)"); plt.ylabel("Female markers (avg log2)")
     plt.title("Sex-marker Concordance (per sample)")
-    # if metadata has sex, try to color mismatches (simple heuristic)
     if any(c.lower() in ["sex","gender"] for c in meta.columns):
         sex_col = next(c for c in meta.columns if c.lower() in ["sex","gender"])
         sex = meta[sex_col].astype(str).reindex(expr_log2.columns)
         for i, s in enumerate(sex):
             if isinstance(s, str) and s:
-                # heuristic mismatch region
                 if s.lower().startswith("m") and fem.iloc[i] > mal.iloc[i]:
                     plt.annotate("?", (mal.iloc[i], fem.iloc[i]))
                 if s.lower().startswith("f") and mal.iloc[i] > fem.iloc[i]:
@@ -538,11 +558,9 @@ def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization
     _savefig(os.path.join(output_dir, "pca_clean_groups.png"))
 
 def pca_loadings_plots(pca_model: PCA, expr_harmonized: pd.DataFrame, figdir: str, topn: int = 20):
-    # top genes contributing to PC1/PC2
     comps = pca_model.components_
     genes = expr_harmonized.index.astype(str).tolist()
-    if comps.shape[1] != len(genes):  # should match after safe_matrix_for_pca zscored & transpose
-        # map back using columns of Xc in run_pipeline; if mismatch, skip
+    if comps.shape[1] != len(genes):
         return
     for i in range(min(2, comps.shape[0])):
         w = comps[i]
@@ -582,12 +600,6 @@ def nonlinear_embedding_plots(Xc, meta, figdir, harmonization_mode, make=True):
 # ---------------- Outliers / Checks ----------------
 
 def detect_outliers(expr_log2: pd.DataFrame) -> pd.DataFrame:
-    """
-    Robust outlier detection on samples.
-    - Works even if gene names are non-strings or duplicated.
-    - Handles small-n gracefully.
-    """
-    # shape: samples x genes
     X = (expr_log2.T
          .replace([np.inf, -np.inf], np.nan)
          .fillna(0.0))
@@ -640,10 +652,6 @@ def _bh_fdr(p: np.ndarray) -> np.ndarray:
 
 def differential_expression(expr_log2: pd.DataFrame, meta: pd.DataFrame,
                             contrasts: Iterable[Tuple[str, str]]) -> Dict[str, pd.DataFrame]:
-    """
-    Simple DE: Welch's t-test on log2 values; returns dict of dataframes per contrast
-    with columns: meanA, meanB, log2FC(A-B), t, pval, qval (BH)
-    """
     from scipy.stats import ttest_ind
     res = {}
     for A, B in contrasts:
@@ -662,7 +670,6 @@ def differential_expression(expr_log2: pd.DataFrame, meta: pd.DataFrame,
     return res
 
 def volcano_and_ma_plots(de_df: pd.DataFrame, contrast_name: str, figdir: str):
-    # Volcano: log2FC vs -log10(pval)
     if de_df is None or de_df.empty: return
     log2fc = de_df["log2FC"].values
     p = de_df["pval"].clip(lower=1e-300).values
@@ -674,8 +681,7 @@ def volcano_and_ma_plots(de_df: pd.DataFrame, contrast_name: str, figdir: str):
     plt.title(f"Volcano: {contrast_name}")
     _savefig(os.path.join(figdir, f"volcano_{contrast_name}.png"))
 
-    # MA plot: avg expression vs log2FC
-    # use mean of groups if available
+    # MA plot
     means = None
     for c in de_df.columns:
         if c.startswith("mean_"):
@@ -694,10 +700,8 @@ def heatmap_top_de(expr_log2: pd.DataFrame, meta: pd.DataFrame, de_df: pd.DataFr
     top = de_df.sort_values("qval").head(topn).index
     sub = expr_log2.loc[expr_log2.index.intersection(top)]
     if sub.empty: return
-    # z-score rows
     mu = sub.mean(axis=1); sd = sub.std(axis=1, ddof=1).replace(0,np.nan)
     z = sub.sub(mu, axis=0).div(sd, axis=0).fillna(0)
-    # order samples by group for readability
     order = meta.sort_values("group").index
     z = z[order.intersection(z.columns)]
     plt.figure(figsize=(max(10, z.shape[1] * 0.15), max(6, z.shape[0] * 0.15)))
@@ -711,9 +715,6 @@ def heatmap_top_de(expr_log2: pd.DataFrame, meta: pd.DataFrame, de_df: pd.DataFr
 # ---------------- GSEA (optional) ----------------
 
 def gsea_from_ranks(rank_series: pd.Series, gmt_path: str, outdir: str) -> Optional[pd.DataFrame]:
-    """
-    rank_series: pd.Series where index=gene, values=ranking score (e.g., t or log2FC)
-    """
     if not (_HAVE_GSEAPY and os.path.exists(gmt_path)):
         return None
     os.makedirs(outdir, exist_ok=True)
@@ -744,10 +745,10 @@ def run_pipeline(
     gsea_gmt: Optional[str] = None,  # optional path to .gmt
 ) -> Dict[str, str]:
     """
-    Generalized pipeline.
+    Generalized pipeline with fail-soft PCA.
     Modes:
       - Multi-file: group_to_file={group: file-like/path, ...}
-      - Single-file: single_expression_file=matrix (columns=samples), groups read from metadata if present
+      - Single-file: single_expression_file=matrix (columns=samples)
     Returns dict with paths to key outputs and a ZIP file consolidating everything.
     """
     if metadata_file is None:
@@ -774,7 +775,6 @@ def run_pipeline(
     # 2) Read & align metadata
     m = _read_metadata_any(metadata_file, name_hint=metadata_name_hint)
 
-    # --- ID column detection (robust) ---
     def _norm(s):
         return re.sub(r"[^a-z0-9]", "", str(s).strip().lower())
 
@@ -816,7 +816,6 @@ def run_pipeline(
     m[id_col] = m[id_col].astype(str).str.strip()
     m_align = m.set_index(id_col)
 
-    # for single-file mode, meta_base.bare_id is the column name; for multi-file it's the suffix after "__"
     meta = meta_base.copy()
     if group_col is not None:
         meta["group_external"] = m_align[group_col].reindex(meta["bare_id"]).values
@@ -853,8 +852,8 @@ def run_pipeline(
     expr_imputed = drop_zero_variance(row_mean_impute(expr_log2))
     gene_vars = expr_imputed.var(axis=1)
     pos = gene_vars[gene_vars > 0]
-    topk = min(pca_topk_features, len(pos))
-    expr_filtered = expr_imputed.loc[pos.nlargest(topk).index]
+    topk = min(pca_topk_features, len(pos)) if len(pos) > 0 else 0
+    expr_filtered = expr_imputed.loc[pos.nlargest(topk).index] if topk > 0 else expr_imputed.iloc[0:0]
 
     # 6) Batch collapsing + harmonization
     meta["batch_collapsed"] = smart_batch_collapse(meta, min_batch_size_for_combat)
@@ -862,48 +861,66 @@ def run_pipeline(
     if meta_batch.isna().any():
         meta_batch = meta_batch.fillna(meta["group"].reindex(expr_filtered.columns).astype(str))
 
-    x_combat = _combat(expr_filtered, meta_batch)
-    if x_combat is not None:
-        expr_harmonized = x_combat
-        mode = "ComBat"
+    if expr_filtered.shape[1] > 0 and expr_filtered.shape[0] > 0:
+        x_combat = _combat(expr_filtered, meta_batch)
+        if x_combat is not None:
+            expr_harmonized = x_combat
+            mode = "ComBat"
+        else:
+            expr_harmonized = _fallback_center(expr_filtered, meta_batch)
+            mode = "fallback_center"
     else:
-        expr_harmonized = _fallback_center(expr_filtered, meta_batch)
-        mode = "fallback_center"
+        # If filtering removed everything, just carry forward mean-imputed matrix (empty)
+        expr_harmonized = expr_filtered.copy()
+        mode = "no_features"
 
-    # 7) PCA
-    Xc = safe_matrix_for_pca(zscore_rows(expr_harmonized), topk=topk)
-    pca = PCA(n_components=min(6, Xc.shape[1]), random_state=42).fit(Xc)
-    Xp = pca.transform(Xc)
-    pca_df = pd.DataFrame(Xp[:, :min(6, Xp.shape[1])], columns=[f"PC{i+1}" for i in range(min(6, Xp.shape[1]))], index=Xc.index).join(meta)
-
-    # 7b) KPIs: silhouette (batch vs group) on first 4 PCs
+    # 7) PCA (fail-soft if not enough variation or samples)
+    pca_df = pd.DataFrame(index=expr_harmonized.columns)
     kpi = {}
+    pca_skipped_reason = None
     try:
-        use = [c for c in ["PC1","PC2","PC3","PC4"] if c in pca_df.columns]
-        Xs = pca_df[use].values
-        if len(np.unique(meta["batch_collapsed"])) > 1:
-            kpi["silhouette_batch"] = float(silhouette_score(Xs, meta["batch_collapsed"].astype(str)))
-        if len(np.unique(meta["group"])) > 1:
-            kpi["silhouette_group"] = float(silhouette_score(Xs, meta["group"].astype(str)))
-    except Exception:
-        pass
+        Xc = safe_matrix_for_pca(zscore_rows(expr_harmonized), topk=topk)
+        if Xc.shape[0] < 2 or Xc.shape[1] < 2:
+            raise RuntimeError("Too few samples or features for PCA.")
+        pca = PCA(n_components=min(6, Xc.shape[1]), random_state=42).fit(Xc)
+        Xp = pca.transform(Xc)
+        pca_df = (pd.DataFrame(
+            Xp[:, :min(6, Xp.shape[1])],
+            columns=[f"PC{i+1}" for i in range(min(6, Xp.shape[1]))],
+            index=Xc.index
+        ).join(meta))
 
-    # 8) Figures
+        # 7b) KPIs on first 4 PCs
+        try:
+            use = [c for c in ["PC1","PC2","PC3","PC4"] if c in pca_df.columns]
+            if len(use) >= 2:
+                Xs = pca_df[use].values
+                if meta["batch_collapsed"].nunique() > 1:
+                    kpi["silhouette_batch"] = float(silhouette_score(Xs, meta["batch_collapsed"].astype(str)))
+                if meta["group"].nunique() > 1:
+                    kpi["silhouette_group"] = float(silhouette_score(Xs, meta["group"].astype(str)))
+        except Exception:
+            pass
+
+        # Figures (only if PCA succeeded)
+        create_enhanced_pca_plots(pca_df, pca, meta, FIGDIR, mode)
+        pca_loadings_plots(pca, expr_harmonized, FIGDIR)
+        nonlinear_embedding_plots(Xc, meta, FIGDIR, mode, make=make_nonlinear)
+
+    except Exception as e:
+        pca_skipped_reason = f"{type(e).__name__}: {e}"
+
+    # 8) Figures (QC always)
     figs = []
     figs += create_sample_qc_figures(combined_expr, expr_log2, meta, FIGDIR)
     figs += create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, FIGDIR)
-    create_enhanced_pca_plots(pca_df, pca, meta, FIGDIR, mode)
-    pca_loadings_plots(pca, expr_harmonized, FIGDIR)
-    nonlinear_embedding_plots(Xc, meta, FIGDIR, mode, make=make_nonlinear)
-
-    # Sex markers & HK stability (if available)
-    hk = plot_housekeeping_stability(expr_log2, FIGDIR)
-    sexp = plot_sex_marker_check(expr_log2, meta, FIGDIR)
+    plot_housekeeping_stability(expr_log2, FIGDIR)
+    plot_sex_marker_check(expr_log2, meta, FIGDIR)
 
     # 9) Outliers
     outliers = detect_outliers(expr_log2); outliers.to_csv(os.path.join(OUTDIR, "outliers.tsv"), sep="\t")
 
-    # 10) DE (group contrasts)
+    # 10) DE (group contrasts) – this will auto-skip contrasts without ≥2 per group
     groups = [g for g in pd.unique(meta["group"].astype(str)) if g and g == g]
     default_contrasts = [(a,b) for a in groups for b in groups if a!=b]
     default_contrasts = [c for c in default_contrasts if not ("ALL" in c)]
@@ -911,7 +928,7 @@ def run_pipeline(
     de_dir = os.path.join(OUTDIR, "de"); os.makedirs(de_dir, exist_ok=True)
     for k, df in de.items():
         df.to_csv(os.path.join(de_dir, f"DE_{k}.tsv"), sep="\t")
-        # Key visuals for first few contrasts
+        # Key visuals
         volcano_and_ma_plots(df, k, FIGDIR)
         heatmap_top_de(expr_log2, meta, df, k, FIGDIR, topn=50)
 
@@ -926,6 +943,7 @@ def run_pipeline(
 
     # 12) Save harmonized + PCA tables
     expr_harmonized.to_csv(os.path.join(OUTDIR, "expression_harmonized.tsv"), sep="\t")
+    # Save PCA scores even if empty (UI can still handle)
     pca_df.to_csv(os.path.join(OUTDIR, "pca_scores.tsv"), sep="\t")
 
     # 13) Simple report
@@ -936,6 +954,9 @@ def run_pipeline(
                **kpi},
         "shapes": {"genes": int(combined_expr.shape[0]), "samples": int(combined_expr.shape[1])}
     }
+    if pca_skipped_reason:
+        rep["notes"] = {"pca_skipped_reason": pca_skipped_reason}
+
     with open(os.path.join(OUTDIR, "report.json"), "w") as f:
         json.dump(rep, f, indent=2)
 
@@ -954,5 +975,3 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
-
-
