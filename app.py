@@ -4,26 +4,39 @@ import streamlit as st
 import pandas as pd
 from harmonizer import run_pipeline
 # --- Streamlit compatibility shims (older versions may not support some kwargs) ---
-# --- Streamlit compatibility shims (older versions may not support some kwargs) ---
+# --- Streamlit compatibility shims ---
 def safe_button(label, **kwargs):
     import streamlit as st
     try:
         return st.button(label, **kwargs)
-    except TypeError:
-        # Drop newer kwargs and retry
+    except Exception:
         kwargs.pop("type", None)
         kwargs.pop("use_container_width", None)
         return st.button(label, **kwargs)
 
 def safe_download_button(label, data=None, **kwargs):
+    """
+    Robust wrapper around st.download_button for older Streamlit versions.
+    Strategy:
+      1) Try as-is.
+      2) Drop 'use_container_width' and retry.
+      3) Drop non-essential kwargs and retry with only (label, data).
+    """
     import streamlit as st
     try:
-        # Always call with keywords to avoid very-old positional quirks
         return st.download_button(label=label, data=data, **kwargs)
-    except TypeError:
-        # Drop newer/iffy kwargs and retry the REAL widget (not this shim!)
+    except Exception:
+        # 2) Retry without newer kwarg
         kwargs.pop("use_container_width", None)
-        return st.download_button(label=label, data=data, **kwargs)
+        try:
+            return st.download_button(label=label, data=data, **kwargs)
+        except Exception:
+            # 3) Minimal fallback (strip extras)
+            kwargs.pop("mime", None)
+            kwargs.pop("file_name", None)
+            kwargs.pop("help", None)
+            kwargs.pop("key", None)
+            return st.download_button(label=label, data=data)
 
 # ---- Page Setup ----
 st.set_page_config(
@@ -528,6 +541,7 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
 
 
