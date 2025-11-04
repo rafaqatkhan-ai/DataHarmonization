@@ -3,10 +3,10 @@ import os, io, tempfile, shutil, json
 import streamlit as st
 import pandas as pd
 from harmonizer import run_pipeline
+import datetime as _dt
+
 # --- Streamlit compatibility shims (older versions may not support some kwargs) ---
-# --- Streamlit compatibility shims ---
 def safe_button(label, **kwargs):
-    import streamlit as st
     try:
         return st.button(label, **kwargs)
     except Exception:
@@ -22,16 +22,13 @@ def safe_download_button(label, data=None, **kwargs):
       2) Drop 'use_container_width' and retry.
       3) Drop non-essential kwargs and retry with only (label, data).
     """
-    import streamlit as st
     try:
         return st.download_button(label=label, data=data, **kwargs)
     except Exception:
-        # 2) Retry without newer kwarg
         kwargs.pop("use_container_width", None)
         try:
             return st.download_button(label=label, data=data, **kwargs)
         except Exception:
-            # 3) Minimal fallback (strip extras)
             kwargs.pop("mime", None)
             kwargs.pop("file_name", None)
             kwargs.pop("help", None)
@@ -44,6 +41,12 @@ st.set_page_config(
     page_icon="🧬",
     layout="wide",
 )
+
+# Init session state (used later by tabs)
+if "run_id" not in st.session_state:
+    st.session_state.run_id = None
+if "out" not in st.session_state:
+    st.session_state.out = None
 
 # =========================
 # THEME SELECTOR (non-black)
@@ -63,31 +66,18 @@ def apply_theme(t: str):
         [data-testid="stAppViewContainer"] { background:#f3f4f6 !important; color:#0f172a !important; }
         [data-testid="stSidebar"] { background:#e5e7eb !important; border-right:1px solid #cbd5e1 !important; }
         [data-testid="stVerticalBlock"] { background:#ffffff !important; border-radius:12px; padding:1rem; margin-bottom:1rem; box-shadow:0 2px 8px rgba(15,23,42,0.06) !important; }
-
         h1,h2,h3,h4,h5,h6,p,label,span { color:#0f172a !important; }
-
-        .stButton>button {
-            background:linear-gradient(90deg,#2563eb,#1d4ed8) !important; color:#fff !important; border:none !important;
-            border-radius:8px !important; padding:.5rem 1rem !important; font-weight:600 !important;
-        }
-        .stButton>button:hover {
-            background:linear-gradient(90deg,#3b82f6,#2563eb) !important; transform:translateY(-2px) !important;
-            box-shadow:0 4px 10px rgba(37,99,235,.25) !important;
-        }
-
+        .stButton>button { background:linear-gradient(90deg,#2563eb,#1d4ed8) !important; color:#fff !important; border:none !important;
+            border-radius:8px !important; padding:.5rem 1rem !important; font-weight:600 !important; }
+        .stButton>button:hover { background:linear-gradient(90deg,#3b82f6,#2563eb) !important; transform:translateY(-2px) !important;
+            box-shadow:0 4px 10px rgba(37,99,235,.25) !important; }
         .stTabs [data-baseweb="tab-list"]{ gap:16px !important; }
-        .stTabs [data-baseweb="tab"]{
-            background:#e9f0fa !important; color:#1e3a8a !important; border:1px solid #cbd5e1 !important;
-            border-radius:10px !important; font-weight:700 !important; transition:all .25s ease-in-out !important;
-            min-width:130px !important; padding:0.6rem 1.2rem !important;
-        }
+        .stTabs [data-baseweb="tab"]{ background:#e9f0fa !important; color:#1e3a8a !important; border:1px solid #cbd5e1 !important;
+            border-radius:10px !important; font-weight:700 !important; transition:all .25s ease-in-out !important; min-width:130px !important; padding:0.6rem 1.2rem !important; }
         .stTabs [data-baseweb="tab"]:hover{ background:#dbeafe !important; color:#0a2540 !important; transform:translateY(-1px) !important; }
-        .stTabs [aria-selected="true"]{
-            background:linear-gradient(135deg,#2563eb,#1e40af) !important; color:#fff !important;
-            box-shadow:0 4px 10px rgba(37,99,235,.25) !important; border:none !important; transform:translateY(-1px) !important;
-        }
+        .stTabs [aria-selected="true"]{ background:linear-gradient(135deg,#2563eb,#1e40af) !important; color:#fff !important;
+            box-shadow:0 4px 10px rgba(37,99,235,.25) !important; border:none !important; transform:translateY(-1px) !important; }
         .stTabs [data-baseweb="tab-panel"]{ background:#ffffff !important; border-radius:10px !important; padding:1rem !important; box-shadow:0 2px 8px rgba(15,23,42,.05) !important; }
-
         .metric-card{ background:#f8fafc !important; border:1px solid #e2e8f0 !important; border-radius:12px !important; padding:14px 16px !important; }
         .smallcaps{ color:#475569 !important; }
         </style>
@@ -98,30 +88,18 @@ def apply_theme(t: str):
         [data-testid="stAppViewContainer"] { background:#faf7f2 !important; color:#1f2937 !important; }
         [data-testid="stSidebar"] { background:#f3efe8 !important; border-right:1px solid #e5e7eb !important; }
         [data-testid="stVerticalBlock"] { background:#ffffff !important; border-radius:12px !important; padding:1rem !important; margin-bottom:1rem !important; box-shadow:0 2px 10px rgba(0,0,0,0.06) !important; }
-
         h1,h2,h3,h4,h5,h6,p,label,span { color:#111827 !important; }
-
-        .stButton>button {
-            background:linear-gradient(90deg,#10b981,#059669) !important; color:#fff !important; border:none !important;
-            border-radius:8px !important; padding:.5rem 1rem !important; font-weight:600 !important;
-        }
-        .stButton>button:hover {
-            background:linear-gradient(90deg,#34d399,#10b981) !important; transform:translateY(-2px) !important;
-            box-shadow:0 4px 10px rgba(16,185,129,.25) !important;
-        }
-
+        .stButton>button { background:linear-gradient(90deg,#10b981,#059669) !important; color:#fff !important; border:none !important;
+            border-radius:8px !important; padding:.5rem 1rem !important; font-weight:600 !important; }
+        .stButton>button:hover { background:linear-gradient(90deg,#34d399,#10b981) !important; transform:translateY(-2px) !important;
+            box-shadow:0 4px 10px rgba(16,185,129,.25) !important; }
         .stTabs [data-baseweb="tab-list"]{ gap:16px !important; }
-        .stTabs [data-baseweb="tab"]{
-            background:#fff7ed !important; color:#7c2d12 !important; border:1px solid #fed7aa !important;
-            border-radius:10px !important; font-weight:700 !important; min-width:130px !important; padding:0.6rem 1.2rem !important;
-        }
+        .stTabs [data-baseweb="tab"]{ background:#fff7ed !important; color:#7c2d12 !important; border:1px solid #fed7aa !important;
+            border-radius:10px !important; font-weight:700 !important; min-width:130px !important; padding:0.6rem 1.2rem !important; }
         .stTabs [data-baseweb="tab"]:hover{ background:#ffedd5 !important; color:#4a1d0a !important; }
-        .stTabs [aria-selected="true"]{
-            background:linear-gradient(135deg,#f97316,#ef4444) !important; color:#fff !important; border:none !important;
-            box-shadow:0 4px 12px rgba(249,115,22,.25) !important; transform:translateY(-1px) !important;
-        }
+        .stTabs [aria-selected="true"]{ background:linear-gradient(135deg,#f97316,#ef4444) !important; color:#fff !important; border:none !important;
+            box-shadow:0 4px 12px rgba(249,115,22,.25) !important; transform:translateY(-1px) !important; }
         .stTabs [data-baseweb="tab-panel"]{ background:#ffffff !important; border-radius:10px !important; padding:1rem !important; box-shadow:0 2px 8px rgba(0,0,0,.05) !important; }
-
         .metric-card{ background:#ffffff !important; border:1px solid #f3f4f6 !important; border-radius:12px !important; padding:14px 16px !important; }
         .smallcaps{ color:#6b7280 !important; }
         </style>
@@ -132,30 +110,18 @@ def apply_theme(t: str):
         [data-testid="stAppViewContainer"] { background:#0b1020 !important; color:#e5e7eb !important; }
         [data-testid="stSidebar"] { background:#0f172a !important; color:#f3f4f6 !important; border-right:1px solid #1f2a44 !important; }
         [data-testid="stVerticalBlock"] { background:#0d142a !important; border-radius:12px !important; padding:1rem !important; margin-bottom:1rem !important; box-shadow:0 2px 12px rgba(0,0,0,.5) !important; }
-
         h1,h2,h3,h4,h5,h6,p,label,span { color:#e5e7eb !important; }
-
-        .stButton>button {
-            background:linear-gradient(90deg,#06b6d4,#3b82f6) !important; color:#0b1020 !important; border:none !important;
-            border-radius:8px !important; padding:.5rem 1rem !important; font-weight:700 !important;
-        }
-        .stButton>button:hover {
-            background:linear-gradient(90deg,#22d3ee,#60a5fa) !important; transform:translateY(-2px) !important;
-            box-shadow:0 4px 12px rgba(34,211,238,.35) !important;
-        }
-
+        .stButton>button { background:linear-gradient(90deg,#06b6d4,#3b82f6) !important; color:#0b1020 !important; border:none !important;
+            border-radius:8px !important; padding:.5rem 1rem !important; font-weight:700 !important; }
+        .stButton>button:hover { background:linear-gradient(90deg,#22d3ee,#60a5fa) !important; transform:translateY(-2px) !important;
+            box-shadow:0 4px 12px rgba(34,211,238,.35) !important; }
         .stTabs [data-baseweb="tab-list"]{ gap:16px !important; }
-        .stTabs [data-baseweb="tab"]{
-            background:#111827 !important; color:#cbd5e1 !important; border:1px solid #1f2937 !important;
-            border-radius:10px !important; font-weight:700 !important; min-width:130px !important; padding:0.6rem 1.2rem !important;
-        }
+        .stTabs [data-baseweb="tab"]{ background:#111827 !important; color:#cbd5e1 !important; border:1px solid #1f2937 !important;
+            border-radius:10px !important; font-weight:700 !important; min-width:130px !important; padding:0.6rem 1.2rem !important; }
         .stTabs [data-baseweb="tab"]:hover{ background:#0b1220 !important; color:#f1f5f9 !important; }
-        .stTabs [aria-selected="true"]{
-            background:linear-gradient(135deg,#06b6d4,#6366f1) !important; color:#0b1020 !important; border:none !important;
-            box-shadow:0 4px 12px rgba(6,182,212,.35) !important; transform:translateY(-1px) !important;
-        }
+        .stTabs [aria-selected="true"]{ background:linear-gradient(135deg,#06b6d4,#6366f1) !important; color:#0b1020 !important; border:none !important;
+            box-shadow:0 4px 12px rgba(6,182,212,.35) !important; transform:translateY(-1px) !important; }
         .stTabs [data-baseweb="tab-panel"]{ background:#0b1020 !important; border-radius:10px !important; padding:1rem !important; box-shadow:inset 0 0 0 1px rgba(99,102,241,.15) !important; }
-
         .metric-card{ background:#0f172a !important; border:1px solid rgba(99,102,241,.2) !important; border-radius:12px !important; padding:14px 16px !important; }
         .smallcaps{ color:#93c5fd !important; }
         </style>
@@ -166,30 +132,18 @@ def apply_theme(t: str):
         [data-testid="stAppViewContainer"] { background:#0f172a !important; color:#e2e8f0 !important; }
         [data-testid="stSidebar"] { background:#111827 !important; border-right:1px solid #1f2937 !important; }
         [data-testid="stVerticalBlock"] { background:#0b1220 !important; border-radius:12px !important; padding:1rem !important; margin-bottom:1rem !important; box-shadow:0 2px 10px rgba(2,6,23,.6) !important; }
-
         h1,h2,h3,h4,h5,h6,p,label,span { color:#e2e8f0 !important; }
-
-        .stButton>button {
-            background:linear-gradient(90deg,#818cf8,#22d3ee) !important; color:#0b1220 !important; border:none !important;
-            border-radius:8px !important; padding:.5rem 1rem !important; font-weight:700 !important;
-        }
-        .stButton>button:hover {
-            background:linear-gradient(90deg,#a5b4fc,#67e8f9) !important; transform:translateY(-2px) !important;
-            box-shadow:0 4px 12px rgba(129,140,248,.35) !important;
-        }
-
+        .stButton>button { background:linear-gradient(90deg,#818cf8,#22d3ee) !important; color:#0b1220 !important; border:none !important;
+            border-radius:8px !important; padding:.5rem 1rem !important; font-weight:700 !important; }
+        .stButton>button:hover { background:linear-gradient(90deg,#a5b4fc,#67e8f9) !important; transform:translateY(-2px) !important;
+            box-shadow:0 4px 12px rgba(129,140,248,.35) !important; }
         .stTabs [data-baseweb="tab-list"]{ gap:16px !important; }
-        .stTabs [data-baseweb="tab"]{
-            background:#111827 !important; color:#cbd5e1 !important; border:1px solid #1f2937 !important;
-            border-radius:10px !important; font-weight:700 !important; min-width:130px !important; padding:0.6rem 1.2rem !important;
-        }
+        .stTabs [data-baseweb="tab"]{ background:#111827 !important; color:#cbd5e1 !important; border:1px solid #1f2937 !important;
+            border-radius:10px !important; font-weight:700 !important; min-width:130px !important; padding:0.6rem 1.2rem !important; }
         .stTabs [data-baseweb="tab"]:hover{ background:#0b1220 !important; color:#f8fafc !important; }
-        .stTabs [aria-selected="true"]{
-            background:linear-gradient(135deg,#22d3ee,#818cf8,#a78bfa) !important; color:#0b1220 !important; border:none !important;
-            box-shadow:0 4px 12px rgba(34,211,238,.35) !important; transform:translateY(-1px) !important;
-        }
+        .stTabs [aria-selected="true"]{ background:linear-gradient(135deg,#22d3ee,#818cf8,#a78bfa) !important; color:#0b1220 !important; border:none !important;
+            box-shadow:0 4px 12px rgba(34,211,238,.35) !important; transform:translateY(-1px) !important; }
         .stTabs [data-baseweb="tab-panel"]{ background:#0f172a !important; border-radius:10px !important; padding:1rem !important; box-shadow:inset 0 0 0 1px rgba(148,163,184,.12) !important; }
-
         .metric-card{ background:#0b1220 !important; border:1px solid rgba(148,163,184,.25) !important; border-radius:12px !important; padding:14px 16px !important; }
         .smallcaps{ color:#94a3b8 !important; }
         </style>
@@ -220,21 +174,9 @@ st.markdown(
         50% { background-position: 100% 50%; }
         100% { background-position: 0% 50%; }
     }
-    .centered-title span {
-        font-size: 2.8rem;
-        animation: pulse 2s infinite alternate;
-    }
-    @keyframes pulse {
-        from { transform: scale(1); opacity: 0.85; }
-        to { transform: scale(1.2); opacity: 1; }
-    }
-    .subtitle {
-        text-align: center;
-        opacity: .9;
-        font-size: 1rem;
-        margin-top: -0.6rem;
-        font-style: italic;
-    }
+    .centered-title span { font-size: 2.8rem; animation: pulse 2s infinite alternate; }
+    @keyframes pulse { from { transform: scale(1); opacity: 0.85; } to { transform: scale(1.2); opacity: 1; } }
+    .subtitle { text-align: center; opacity: .9; font-size: 1rem; margin-top: -0.6rem; font-style: italic; }
     </style>
 
     <h1 class="centered-title">
@@ -318,7 +260,6 @@ with st.expander("Advanced settings"):
     do_nonlinear = st.checkbox("Make UMAP/t-SNE (if available)", value=True)
 
 # ---------------- Run ----------------
-# ---------------- Run ----------------
 run = safe_button("🚀 Run Harmonization", type="primary", use_container_width=True)
 
 if run:
@@ -333,7 +274,7 @@ if run:
         "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip()],
         "metadata_group_cols": [c.strip() for c in grp_cols.split(",") if c.strip()],
         "metadata_batch_col": (batch_col.strip() or None),
-        "out_root": out_dir,                    # will be replaced by timestamped subfolder below
+        "out_root": out_dir,  # replaced below with timestamped subfolder
         "pca_topk_features": int(pca_topk),
         "make_nonlinear": do_nonlinear,
     }
@@ -368,14 +309,7 @@ if run:
     # ---- Run pipeline with timestamped out_root ----
     try:
         with st.spinner("Running harmonization..."):
-            # Initialize session state
-            if "run_id" not in st.session_state:
-                st.session_state.run_id = None
-            if "out" not in st.session_state:
-                st.session_state.out = None
-
             # Unique run folder
-            import datetime as _dt
             run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
             kwargs["out_root"] = os.path.join(out_dir, run_id)
 
@@ -399,8 +333,6 @@ if run:
             report = json.load(fh)
     except Exception:
         pass
-
-
 
     # Show success, then a gentle warning if PCA was skipped
     st.success("Done!")
@@ -436,7 +368,7 @@ if run:
 
     # ---- Overview
     with tabs[0]:
-        st.json(report if report else {"info":"report.json not found"})
+        st.json(report if report else {"info": "report.json not found"})
         fig_dir = out["figdir"]
         previews = ["dist_pre_vs_post_log2.png", "pca_clean_groups.png", "enhanced_pca_analysis.png"]
         show = [f for f in previews if os.path.exists(os.path.join(fig_dir, f))]
@@ -482,24 +414,22 @@ if run:
             p = os.path.join(fig_dir, f)
             if os.path.exists(p):
                 st.image(p, caption=os.path.basename(p), use_column_width=True)
-        # If nothing exists, the warning above already explains why.
 
     # ---- DE & GSEA
     with tabs[3]:
         fig_dir = out["figdir"]
         de_dir = os.path.join(out["outdir"], "de")
         de_files = [f for f in os.listdir(de_dir)] if os.path.isdir(de_dir) else []
-        contrasts = [f.replace("DE_","").replace(".tsv","") for f in de_files if f.startswith("DE_")]
+        contrasts = sorted([f.replace("DE_", "").replace(".tsv", "") for f in de_files if f.startswith("DE_")])
         pick = st.selectbox("Select contrast", contrasts) if contrasts else None
         if pick:
             st.write(f"### Differential Expression: {pick}")
             vol = os.path.join(fig_dir, f"volcano_{pick}.png")
             ma = os.path.join(fig_dir, f"ma_{pick}.png")
             hm = os.path.join(fig_dir, f"heatmap_top_50_{pick}.png")
-            for p in [vol, ma, hm]:
-                if os.path.exists(p):
-                    st.image(p, caption=os.path.basename(p), use_column_width=True)
-            # show table preview
+            for pth in [vol, ma, hm]:
+                if os.path.exists(pth):
+                    st.image(pth, caption=os.path.basename(pth), use_column_width=True)
             tsv = os.path.join(de_dir, f"DE_{pick}.tsv")
             try:
                 df = pd.read_csv(tsv, sep="\t", index_col=0).head(50)
@@ -508,7 +438,6 @@ if run:
                     safe_download_button("⬇️ Download full DE table", fh.read(), file_name=f"DE_{pick}.tsv", mime="text/tab-separated-values")
             except Exception:
                 pass
-        # GSEA if any
         gsea_dir = os.path.join(out["outdir"], "gsea")
         if os.path.isdir(gsea_dir):
             st.write("### GSEA Results")
@@ -520,60 +449,50 @@ if run:
                         st.dataframe(df, use_container_width=True)
                     except Exception:
                         pass
+
     # ---- Outliers
-    # ---- Outliers
-# ---- Outliers
-with tabs[4]:
-    # Always reference the latest run
-    out_curr = st.session_state.get("out") or out
+    with tabs[4]:
+        # Always reference the latest run
+        out_curr = st.session_state.get("out") or out
+        try:
+            outliers_path = os.path.join(out_curr["outdir"], "outliers.tsv")
+            meta_path = os.path.join(out_curr["outdir"], "metadata.tsv")
 
-    try:
-        outliers_path = os.path.join(out_curr["outdir"], "outliers.tsv")
-        meta_path = os.path.join(out_curr["outdir"], "metadata.tsv")
+            if os.path.exists(outliers_path):
+                df = pd.read_csv(outliers_path, sep="\t", index_col=0)
 
-        if os.path.exists(outliers_path):
-            df = pd.read_csv(outliers_path, sep="\t", index_col=0)
+                # Join metadata for readability if available
+                if os.path.exists(meta_path):
+                    meta_df = pd.read_csv(meta_path, sep="\t", index_col=0)
+                    display_df = (
+                        df.copy()
+                        .assign(sample=df.index)
+                        .join(meta_df[["bare_id", "group"]], how="left")
+                        .set_index("sample")
+                        .rename(columns={"IsolationForest": "IsolationForest_flag", "LOF": "LOF_flag"})
+                        [["bare_id", "group", "IsolationForest_flag", "LOF_flag"]]
+                    )
+                else:
+                    display_df = df
 
-            # Join metadata for readability if available
-            if os.path.exists(meta_path):
-                meta_df = pd.read_csv(meta_path, sep="\t", index_col=0)
-                display_df = (
-                    df.copy()
-                    .assign(sample=df.index)
-                    .join(meta_df[["bare_id", "group"]], how="left")
-                    .set_index("sample")
-                    .rename(
-                        columns={
-                            "IsolationForest": "IsolationForest_flag",
-                            "LOF": "LOF_flag",
-                        }
-                    )[["bare_id", "group", "IsolationForest_flag", "LOF_flag"]]
+                st.write("### Outlier flags (1 = outlier)")
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    key=f"outliers_df_{st.session_state.get('run_id','noid')}",
                 )
+
+                with open(outliers_path, "rb") as fh:
+                    safe_download_button(
+                        "⬇️ Download outlier table",
+                        fh.read(),
+                        file_name="outliers.tsv",
+                        mime="text/tab-separated-values",
+                    )
             else:
-                display_df = df
-
-            st.write("### Outlier flags (1 = outlier)")
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                key=f"outliers_df_{st.session_state.get('run_id','noid')}",
-            )
-
-            with open(outliers_path, "rb") as fh:
-                safe_download_button(
-                    "⬇️ Download outlier table",
-                    fh.read(),
-                    file_name="outliers.tsv",
-                    mime="text/tab-separated-values",
-                )
-
-        else:
-            st.info("No outlier table found for this run.")
-
-    except Exception as e:
-        st.warning(f"Could not load outliers for this run: {e}")
-
-
+                st.info("No outlier table found for this run.")
+        except Exception as e:
+            st.warning(f"Could not load outliers for this run: {e}")
 
     # ---- Files
     with tabs[5]:
@@ -590,7 +509,7 @@ with tabs[4]:
             for label, path in core_files:
                 if os.path.exists(path):
                     with open(path, "rb") as fh:
-                        safe_download_button(f"⬇️ {label}", fh.read(), file_name=os.path.basename(path), mime="text/plain", use_column_width=True)
+                        safe_download_button(f"⬇️ {label}", fh.read(), file_name=os.path.basename(path), mime="text/plain", use_container_width=True)
         with colB:
             try:
                 with open(out["zip"], "rb") as fh:
@@ -599,7 +518,7 @@ with tabs[4]:
                         data=fh.read(),
                         file_name="harmonization_results.zip",
                         mime="application/zip",
-                        use_column_width=True,
+                        use_container_width=True,
                     )
             except Exception as e:
                 st.warning(f"Could not open ZIP for download: {e}")
@@ -607,18 +526,3 @@ with tabs[4]:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
