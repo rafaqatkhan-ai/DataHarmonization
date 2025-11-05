@@ -3,7 +3,7 @@
 import os, io, tempfile, shutil, json
 import streamlit as st
 import pandas as pd
-from harmonizer import run_pipeline
+from harmonizer import run_pipeline, run_pipeline_multi, summarize_multi_results
 import datetime as _dt
 
 # =========================
@@ -350,325 +350,329 @@ if run:
     st.success("Done!")
     if report.get("notes", {}).get("pca_skipped_reason"):
         st.warning("PCA/UMAP skipped: " + str(report["notes"]["pca_skipped_reason"]))
+        # =========================
+        # RESULTS (always visible)
+        # =========================
+        st.subheader("Results")
 
-    # ------- UI: Results Tabs -------
-    st.subheader("Results")
+        # Build tabs unconditionally
+        tabs = st.tabs(["Overview", "QC", "PCA & Embeddings", "DE & GSEA", "Outliers", "Multi-GEO", "Files"])
 
-    # KPI Cards
-    kcol1, kcol2, kcol3, kcol4 = st.columns(4)
-    qc = report.get("qc", {})
-    shp = report.get("shapes", {})
-    with kcol1:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Samples", shp.get("samples", "—"))
-        st.markdown('<div class="smallcaps">Total samples</div></div>', unsafe_allow_html=True)
-    with kcol2:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Genes", shp.get("genes", "—"))
-        st.markdown('<div class="smallcaps">Features detected</div></div>', unsafe_allow_html=True)
-    with kcol3:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Zero fraction", f'{qc.get("zero_fraction", 0):.2f}')
-        st.markdown('<div class="smallcaps">Approx. sparsity</div></div>', unsafe_allow_html=True)
-    with kcol4:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        sil_batch = qc.get("silhouette_batch", None)
-        st.metric("Silhouette (batch)", f'{sil_batch:.2f}' if isinstance(sil_batch, (int, float)) else "—")
-        st.markdown('<div class="smallcaps">Lower is better</div></div>', unsafe_allow_html=True)
+        # Convenience handles to last successful run (if any)
+        out_curr = st.session_state.get("out")
+        run_id = st.session_state.get("run_id")
 
-    tabs = st.tabs(["Overview", "QC", "PCA & Embeddings", "DE & GSEA", "Outliers", "Multi-GEO", "Files"])
+        # ---- Overview
+        with tabs[0]:
+            if not out_curr:
+                st.info("No run loaded yet. Upload data and click **Run Harmonization**.")
+            else:
+                # Load report for KPIs (safe)
+                report = {}
+                try:
+                    with open(out_curr["report_json"], "r") as fh:
+                        report = json.load(fh)
+                except Exception:
+                    pass
 
+                # KPI cards
+                qc = report.get("qc", {})
+                shp = report.get("shapes", {})
+                kcol1, kcol2, kcol3, kcol4 = st.columns(4)
+                with kcol1:
+                    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                    st.metric("Samples", shp.get("samples", "—"))
+                    st.markdown('<div class="smallcaps">Total samples</div></div>', unsafe_allow_html=True)
+                with kcol2:
+                    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                    st.metric("Genes", shp.get("genes", "—"))
+                    st.markdown('<div class="smallcaps">Features detected</div></div>', unsafe_allow_html=True)
+                with kcol3:
+                    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                    st.metric("Zero fraction", f'{qc.get("zero_fraction", 0):.2f}')
+                    st.markdown('<div class="smallcaps">Approx. sparsity</div></div>', unsafe_allow_html=True)
+                with kcol4:
+                    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                    sil_batch = qc.get("silhouette_batch", None)
+                    st.metric("Silhouette (batch)", f'{sil_batch:.2f}' if isinstance(sil_batch, (int, float)) else "—")
+                    st.markdown('<div class="smallcaps">Lower is better</div></div>', unsafe_allow_html=True)
 
-    # ---- Overview
-    with tabs[0]:
-        st.json(report if report else {"info": "report.json not found"})
-        fig_dir = out["figdir"]
-        previews = ["dist_pre_vs_post_log2.png", "pca_clean_groups.png", "enhanced_pca_analysis.png"]
-        show = [f for f in previews if os.path.exists(os.path.join(fig_dir, f))]
-        if show:
-            st.write("### Key Figures")
-            c1, c2, c3 = st.columns(3)
-            cols = [c1, c2, c3]
-            for i, f in enumerate(show):
-                with cols[i % 3]:
-                    st.image(os.path.join(fig_dir, f), caption=f, use_column_width=True)
+                st.json(report if report else {"info": "report.json not found"})
 
-    # ---- QC
-    with tabs[1]:
-        fig_dir = out["figdir"]
-        qc_figs = [
-            "qc_library_size.png",
-            "qc_zero_rate_hist.png",
-            "group_density_post_log2.png",
-            "dist_zscore.png",
-            "sample_correlation_heatmap.png",
-            "hk_cv.png",
-            "sex_marker_concordance.png",
-        ]
-        st.write("### QC Figures")
-        for f in qc_figs:
-            p = os.path.join(fig_dir, f)
-            if os.path.exists(p):
-                st.image(p, caption=f, use_column_width=True)
+                # Key figures
+                fig_dir = out_curr["figdir"]
+                previews = ["dist_pre_vs_post_log2.png", "pca_clean_groups.png", "enhanced_pca_analysis.png"]
+                show = [f for f in previews if os.path.exists(os.path.join(fig_dir, f))]
+                if show:
+                    st.write("### Key Figures")
+                    c1, c2, c3 = st.columns(3)
+                    cols = [c1, c2, c3]
+                    for i, f in enumerate(show):
+                        with cols[i % 3]:
+                            st.image(os.path.join(fig_dir, f), caption=f, use_column_width=True)
 
-    # ---- PCA & Embeddings
-    with tabs[2]:
-        fig_dir = out["figdir"]
-        pcs = [
-            "pca_clean_groups.png",
-            "enhanced_pca_analysis.png",
-            "pca_loadings_pc1.png",
-            "pca_loadings_pc2.png",
-            "umap_by_group.png",
-            "tsne_by_group.png",
-        ]
-        st.write("### PCA / UMAP / t-SNE")
-        for f in pcs:
-            p = os.path.join(fig_dir, f)
-            if os.path.exists(p):
-                st.image(p, caption=os.path.basename(p), use_column_width=True)
+        # ---- QC
+        with tabs[1]:
+            if not out_curr:
+                st.info("No run loaded yet.")
+            else:
+                fig_dir = out_curr["figdir"]
+                qc_figs = [
+                    "qc_library_size.png",
+                    "qc_zero_rate_hist.png",
+                    "group_density_post_log2.png",
+                    "dist_zscore.png",
+                    "sample_correlation_heatmap.png",
+                    "hk_cv.png",
+                    "sex_marker_concordance.png",
+                ]
+                st.write("### QC Figures")
+                for f in qc_figs:
+                    p = os.path.join(fig_dir, f)
+                    if os.path.exists(p):
+                        st.image(p, caption=f, use_column_width=True)
 
-    # ---- DE & GSEA
-    with tabs[3]:
-        fig_dir = out["figdir"]
-        de_dir = os.path.join(out["outdir"], "de")
-        de_files = [f for f in os.listdir(de_dir)] if os.path.isdir(de_dir) else []
-        contrasts = sorted([f.replace("DE_", "").replace(".tsv", "") for f in de_files if f.startswith("DE_")])
-        pick = st.selectbox("Select contrast", contrasts) if contrasts else None
-        if pick:
-            st.write(f"### Differential Expression: {pick}")
-            vol = os.path.join(fig_dir, f"volcano_{pick}.png")
-            ma = os.path.join(fig_dir, f"ma_{pick}.png")
-            hm = os.path.join(fig_dir, f"heatmap_top_50_{pick}.png")
-            for pth in [vol, ma, hm]:
-                if os.path.exists(pth):
-                    st.image(pth, caption=os.path.basename(pth), use_column_width=True)
-            tsv = os.path.join(de_dir, f"DE_{pick}.tsv")
-            try:
-                df = pd.read_csv(tsv, sep="\t", index_col=0).head(50)
-                st.dataframe(df, use_container_width=True, key=f"de_table__{st.session_state.run_id}__{pick}")
-                with open(tsv, "rb") as fh:
-                    safe_download_button(
-                        "⬇️ Download full DE table",
-                        fh.read(),
-                        file_name=f"DE_{pick}.tsv",
-                        mime="text/tab-separated-values",
-                        key=f"dl_de__{st.session_state.run_id}__{pick}",
-                    )
-            except Exception:
-                pass
-        gsea_dir = os.path.join(out["outdir"], "gsea")
-        if os.path.isdir(gsea_dir):
-            st.write("### GSEA Results")
-            for f in sorted(os.listdir(gsea_dir)):
-                if f.endswith(".tsv"):
-                    st.write(f)
+        # ---- PCA & Embeddings
+        with tabs[2]:
+            if not out_curr:
+                st.info("No run loaded yet.")
+            else:
+                fig_dir = out_curr["figdir"]
+                pcs = [
+                    "pca_clean_groups.png",
+                    "enhanced_pca_analysis.png",
+                    "pca_loadings_pc1.png",
+                    "pca_loadings_pc2.png",
+                    "umap_by_group.png",
+                    "tsne_by_group.png",
+                ]
+                st.write("### PCA / UMAP / t-SNE")
+                for f in pcs:
+                    p = os.path.join(fig_dir, f)
+                    if os.path.exists(p):
+                        st.image(p, caption=os.path.basename(p), use_column_width=True)
+
+        # ---- DE & GSEA
+        with tabs[3]:
+            if not out_curr:
+                st.info("No run loaded yet.")
+            else:
+                fig_dir = out_curr["figdir"]
+                de_dir = os.path.join(out_curr["outdir"], "de")
+                de_files = [f for f in os.listdir(de_dir)] if os.path.isdir(de_dir) else []
+                contrasts = sorted([f.replace("DE_", "").replace(".tsv", "") for f in de_files if f.startswith("DE_")])
+                pick = st.selectbox("Select contrast", contrasts) if contrasts else None
+                if pick:
+                    st.write(f"### Differential Expression: {pick}")
+                    for pth in [
+                        os.path.join(fig_dir, f"volcano_{pick}.png"),
+                        os.path.join(fig_dir, f"ma_{pick}.png"),
+                        os.path.join(fig_dir, f"heatmap_top_50_{pick}.png"),
+                    ]:
+                        if os.path.exists(pth):
+                            st.image(pth, caption=os.path.basename(pth), use_column_width=True)
+                    tsv = os.path.join(de_dir, f"DE_{pick}.tsv")
                     try:
-                        df = pd.read_csv(os.path.join(gsea_dir, f), sep="\t").head(30)
-                        st.dataframe(df, use_container_width=True, key=f"gsea_{st.session_state.run_id}__{f}")
+                        df = pd.read_csv(tsv, sep="\t", index_col=0).head(50)
+                        st.dataframe(df, use_container_width=True, key=f"de_table__{run_id}__{pick}")
+                        with open(tsv, "rb") as fh:
+                            safe_download_button(
+                                "⬇️ Download full DE table",
+                                fh.read(),
+                                file_name=f"DE_{pick}.tsv",
+                                mime="text/tab-separated-values",
+                                key=f"dl_de__{run_id}__{pick}",
+                            )
                     except Exception:
                         pass
+                gsea_dir = os.path.join(out_curr["outdir"], "gsea")
+                if os.path.isdir(gsea_dir):
+                    st.write("### GSEA Results")
+                    for f in sorted(os.listdir(gsea_dir)):
+                        if f.endswith(".tsv"):
+                            st.write(f)
+                            try:
+                                df = pd.read_csv(os.path.join(gsea_dir, f), sep="\t").head(30)
+                                st.dataframe(df, use_container_width=True, key=f"gsea_{run_id}__{f}")
+                            except Exception:
+                                pass
 
-    # ---- Outliers (FIXED)
-    with tabs[4]:
-        if not st.session_state.out:
-            st.info("No run loaded yet. Please run the pipeline.")
-        else:
-            out_curr = st.session_state.out
-            outliers_path = os.path.join(out_curr["outdir"], "outliers.tsv")
-            meta_path = os.path.join(out_curr["outdir"], "metadata.tsv")
+        # ---- Outliers
+        with tabs[4]:
+            if not out_curr:
+                st.info("No run loaded yet. Please run the pipeline.")
+            else:
+                outliers_path = os.path.join(out_curr["outdir"], "outliers.tsv")
+                meta_path = os.path.join(out_curr["outdir"], "metadata.tsv")
+                st.caption(f"Run: **{run_id}**  •  Outdir: `{out_curr['outdir']}`")
 
-            st.caption(f"Run: **{st.session_state.run_id}**  •  Outdir: `{out_curr['outdir']}`")
-
-            if os.path.exists(outliers_path):
-                mtime = int(os.path.getmtime(outliers_path))
-                cache_buster = f"{st.session_state.run_id}__{mtime}"
-
-                try:
-                    df = pd.read_csv(outliers_path, sep="\t", index_col=0)
-
-                    # Prefer original dataset labels if available
-                    if os.path.exists(meta_path):
-                        meta_df = pd.read_csv(meta_path, sep="\t", index_col=0)
-                        grp_col = "group_raw" if "group_raw" in meta_df.columns else "group"
-
-                        display_df = (
-                            df.copy()
-                            .assign(sample=df.index)
-                            .join(
-                                meta_df[["bare_id", grp_col]].rename(columns={grp_col: "group"}),
-                                how="left"
+                if os.path.exists(outliers_path):
+                    mtime = int(os.path.getmtime(outliers_path))
+                    cache_buster = f"{run_id}__{mtime}"
+                    try:
+                        df = pd.read_csv(outliers_path, sep="\t", index_col=0)
+                        if os.path.exists(meta_path):
+                            meta_df = pd.read_csv(meta_path, sep="\t", index_col=0)
+                            grp_col = "group_raw" if "group_raw" in meta_df.columns else "group"
+                            display_df = (
+                                df.copy()
+                                .assign(sample=df.index)
+                                .join(
+                                    meta_df[["bare_id", grp_col]].rename(columns={grp_col: "group"}),
+                                    how="left"
+                                )
+                                .set_index("sample")
+                                .rename(columns={"IsolationForest": "IsolationForest_flag", "LOF": "LOF_flag"})
+                                [["bare_id", "group", "IsolationForest_flag", "LOF_flag"]]
                             )
-                            .set_index("sample")
-                            .rename(columns={
-                                "IsolationForest": "IsolationForest_flag",
-                                "LOF": "LOF_flag",
-                            })[["bare_id", "group", "IsolationForest_flag", "LOF_flag"]]
-                        )
-                    else:
-                        # Fallback to whatever the outliers.tsv provided
-                        display_df = df.rename(columns={
-                            "IsolationForest": "IsolationForest_flag",
-                            "LOF": "LOF_flag",
+                        else:
+                            display_df = df.rename(
+                                columns={"IsolationForest": "IsolationForest_flag", "LOF": "LOF_flag"})
+                        st.write("### Outlier flags (1 = outlier)")
+                        st.dataframe(display_df, use_container_width=True, key=f"outliers_df__{cache_buster}")
+                        with open(outliers_path, "rb") as fh:
+                            safe_download_button(
+                                "⬇️ Download outlier table",
+                                fh.read(),
+                                file_name="outliers.tsv",
+                                mime="text/tab-separated-values",
+                                key=f"dl_outliers__{cache_buster}",
+                            )
+                    except Exception as e:
+                        st.warning(f"Could not load outliers for this run: {e}")
+                else:
+                    st.info("No outlier table found for this run.")
+
+        # ---- Multi-GEO (always visible)
+        with tabs[5]:
+            st.write("### Batch-run up to 5 GEO datasets (each with `prep_counts` and `prep_meta`)")
+            st.caption(
+                "Tip: counts = gene x sample table; meta = clinical/phenotype table. IDs should map to sample names (or provide candidate ID columns).")
+
+            max_sets = 5
+            attempt_combine = st.checkbox("Attempt to combine into one run when compatible", value=True)
+            min_overlap = st.number_input("Minimum overlapping genes required to combine", 1000, 20000, 3000, step=500)
+
+            geo_rows = []
+            for i in range(max_sets):
+                with st.expander(f"Dataset {i + 1}", expanded=(i == 0)):
+                    geo = st.text_input(f"GEO ID (optional, label only) #{i + 1}", key=f"geo_id_{i}",
+                                        value="" if i > 0 else "GSE273902")
+                    cfile = st.file_uploader("prep_counts (TSV/CSV/XLSX)", type=["tsv", "txt", "csv", "xlsx", "xls"],
+                                             key=f"counts_{i}")
+                    mfile = st.file_uploader("prep_meta (TSV/CSV/XLSX)", type=["tsv", "txt", "csv", "xlsx", "xls"],
+                                             key=f"meta_{i}")
+                    idc = st.text_input("Candidate ID columns in meta (comma-sep)", "bare_id,Id,ID,id,sample,Sample",
+                                        key=f"idcols_{i}")
+                    grpc = st.text_input("Candidate GROUP columns in meta (comma-sep)",
+                                         "group,Group,condition,Condition,phenotype,Phenotype", key=f"grpcols_{i}")
+                    bcol = st.text_input("Batch column (optional)", "", key=f"bcol_{i}")
+                    if cfile and mfile:
+                        geo_rows.append({
+                            "geo": (geo.strip() or f"DS{i + 1}"),
+                            "counts": io.BytesIO(cfile.getvalue()),
+                            "meta": io.BytesIO(mfile.getvalue()),
+                            "meta_id_cols": [c.strip() for c in idc.split(",") if c.strip()],
+                            "meta_group_cols": [c.strip() for c in grpc.split(",") if c.strip()],
+                            "meta_batch_col": (bcol.strip() or None),
                         })
 
-                    st.write("### Outlier flags (1 = outlier)")
-                    st.dataframe(
-                        display_df,
-                        use_container_width=True,
-                        key=f"outliers_df__{cache_buster}",
-                    )
+            run_multi = safe_button("🚀 Run Multi-GEO Harmonization", use_container_width=True, key="run_multi_geo_btn")
 
-                    with open(outliers_path, "rb") as fh:
-                        safe_download_button(
-                            "⬇️ Download outlier table",
-                            fh.read(),
-                            file_name="outliers.tsv",
-                            mime="text/tab-separated-values",
-                            key=f"dl_outliers__{cache_buster}",
+            if run_multi:
+                if not geo_rows:
+                    st.error("Please add at least one dataset with both files.")
+                    st.stop()
+                try:
+                    with st.spinner("Running multi-dataset analysis..."):
+                        multi_res = run_pipeline_multi(
+                            datasets=geo_rows,
+                            attempt_combine=attempt_combine,
+                            combine_minoverlap_genes=int(min_overlap),
+                            out_root=os.path.join(out_dir, "multi_geo"),
+                            pca_topk_features=int(pca_topk),
+                            make_nonlinear=do_nonlinear,
                         )
+                    st.success("Multi-dataset processing complete.")
+                    st.session_state.multi_geo = multi_res
                 except Exception as e:
-                    st.warning(f"Could not load outliers for this run: {e}")
+                    st.error(f"Multi-GEO run failed: {e}")
+
+            if "multi_geo" in st.session_state and st.session_state.multi_geo:
+                multi_res = st.session_state.multi_geo
+                st.write("#### Combination decision")
+                st.json(multi_res.get("combine_decision", {}))
+
+                st.write("#### Results per dataset")
+                cols = st.columns(3)
+                i = 0
+                for name, res in (multi_res.get("runs") or {}).items():
+                    pzip = res.get("zip")
+                    if pzip and os.path.exists(pzip):
+                        with cols[i % 3]:
+                            with open(pzip, "rb") as fh:
+                                safe_download_button(f"⬇️ {name} (ZIP)", fh.read(), file_name=f"{name}_results.zip",
+                                                     mime="application/zip",
+                                                     key=f"dl_zip_{name}_{st.session_state.run_token}")
+                    i += 1
+
+                # Optional: diabetes-style summary
+                try:
+                    summary = summarize_multi_results(multi_res)
+                except Exception:
+                    summary = {}
+
+                st.write("### Cross-dataset analysis (Diabetes example framing)")
+                st.markdown(
+                    f"""
+        1. **TISSUE HOMOGENEITY** — All datasets are expected to be **human pancreatic islets** (confirm in uploaded clinical metadata).  
+        2. **PLATFORM DIVERSITY** — Observed platforms: `{", ".join(sorted(set(summary.get("platforms", {}).values()))) or "n/a"}`.  
+           Mixed RNA-seq / microarray demands careful normalization; cross-platform **validation** increases robustness.  
+        3. **SAMPLE SIZE VARIATION** — Samples per dataset: `{summary.get("sizes", {})}`.  
+           Use per-contrast power checks; DE is skipped if groups < 2 samples each.  
+        4. **CLINICAL HETEROGENEITY** — Harmonize **T2D status, HbA1c, BMI** to unified definitions across GEOs.  
+           Consider covariate adjustment or stratified DE if distributions differ.  
+        5. **ZERO-INFLATION / SPARSITY** — Approx. zero fraction by run: `{summary.get("points", {}).get("approx_sparsity", "n/a")}`.  
+        6. **BATCH EFFECTS** — Silhouette (batch/group) KPIs are tracked per run; inspect combined run if created.
+                    """
+                )
+
+        # ---- Files
+        with tabs[6]:
+            if not out_curr:
+                st.info("No run loaded yet.")
             else:
-                st.info("No outlier table found for this run.")
-    # ---- Multi-GEO (NEW)
-    with tabs[5]:
-        st.write("### Batch-run up to 5 GEO datasets (each with `prep_counts` and `prep_meta`)")
-        st.caption(
-            "Tip: counts = gene x sample table; meta = clinical/phenotype table. IDs should map to sample names (or provide candidate ID columns).")
-
-        max_sets = 5
-        attempt_combine = st.checkbox("Attempt to combine into one run when compatible", value=True)
-        min_overlap = st.number_input("Minimum overlapping genes required to combine", 1000, 20000, 3000, step=500)
-
-        geo_rows = []
-        for i in range(max_sets):
-            with st.expander(f"Dataset {i + 1}", expanded=(i == 0)):
-                geo = st.text_input(f"GEO ID (optional, label only) #{i + 1}", key=f"geo_id_{i}",
-                                    value="" if i > 0 else "GSE273902")
-                cfile = st.file_uploader("prep_counts (TSV/CSV/XLSX)", type=["tsv", "txt", "csv", "xlsx", "xls"],
-                                         key=f"counts_{i}")
-                mfile = st.file_uploader("prep_meta (TSV/CSV/XLSX)", type=["tsv", "txt", "csv", "xlsx", "xls"],
-                                         key=f"meta_{i}")
-                idc = st.text_input("Candidate ID columns in meta (comma-sep)", "bare_id,Id,ID,id,sample,Sample",
-                                    key=f"idcols_{i}")
-                grpc = st.text_input("Candidate GROUP columns in meta (comma-sep)",
-                                     "group,Group,condition,Condition,phenotype,Phenotype", key=f"grpcols_{i}")
-                bcol = st.text_input("Batch column (optional)", "", key=f"bcol_{i}")
-                if cfile and mfile:
-                    geo_rows.append({
-                        "geo": (geo.strip() or f"DS{i + 1}"),
-                        "counts": io.BytesIO(cfile.getvalue()),
-                        "meta": io.BytesIO(mfile.getvalue()),
-                        "meta_id_cols": [c.strip() for c in idc.split(",") if c.strip()],
-                        "meta_group_cols": [c.strip() for c in grpc.split(",") if c.strip()],
-                        "meta_batch_col": (bcol.strip() or None),
-                    })
-
-        run_multi = safe_button("🚀 Run Multi-GEO Harmonization", use_container_width=True, key="run_multi_geo_btn")
-
-        if run_multi:
-            if not geo_rows:
-                st.error("Please add at least one dataset with both files.")
-                st.stop()
-            # Wire into the new multi runner
-            try:
-                with st.spinner("Running multi-dataset analysis..."):
-                    multi_res = run_pipeline_multi(
-                        datasets=geo_rows,
-                        attempt_combine=attempt_combine,
-                        combine_minoverlap_genes=int(min_overlap),
-                        out_root=os.path.join(out_dir, "multi_geo"),
-                        pca_topk_features=int(pca_topk),
-                        make_nonlinear=do_nonlinear,
-                    )
-                st.success("Multi-dataset processing complete.")
-                # Persist so we can show summary without recomputing
-                st.session_state.multi_geo = multi_res
-            except Exception as e:
-                st.error(f"Multi-GEO run failed: {e}")
-
-        # Summary + downloads if available
-        if "multi_geo" in st.session_state and st.session_state.multi_geo:
-            multi_res = st.session_state.multi_geo
-            st.write("#### Combination decision")
-            dec = multi_res.get("combine_decision", {})
-            st.json(dec)
-
-            # Show per-dataset ZIP downloaders + combined if present
-            st.write("#### Results per dataset")
-            cols = st.columns(3)
-            i = 0
-            for name, res in (multi_res.get("runs") or {}).items():
-                pzip = res.get("zip")
-                if pzip and os.path.exists(pzip):
-                    with cols[i % 3]:
-                        with open(pzip, "rb") as fh:
-                            safe_download_button(f"⬇️ {name} (ZIP)", fh.read(), file_name=f"{name}_results.zip",
-                                                 mime="application/zip",
-                                                 key=f"dl_zip_{name}_{st.session_state.run_token}")
-                i += 1
-
-            # Diabetes-style cross-dataset analysis bullets
-            try:
-                summary = summarize_multi_results(multi_res)
-            except Exception:
-                summary = {}
-
-            st.write("### Cross-dataset analysis (Diabetes example framing)")
-            st.markdown(
-                f"""
-    1. **TISSUE HOMOGENEITY** — All datasets are expected to be **human pancreatic islets** (confirm in uploaded clinical metadata).  
-    2. **PLATFORM DIVERSITY** — Observed platforms: `{", ".join(sorted(set(summary.get("platforms", {}).values()))) or "n/a"}`.  
-       Mixed RNA-seq / microarray demands careful normalization; cross-platform **validation** increases robustness.  
-    3. **SAMPLE SIZE VARIATION** — Samples per dataset: `{summary.get("sizes", {})}`.  
-       Use per-contrast power checks; DE is skipped if groups < 2 samples each.  
-    4. **CLINICAL HETEROGENEITY** — Harmonize **T2D status, HbA1c, BMI** to unified definitions across GEOs.  
-       Consider covariate adjustment or stratified DE if distributions differ.  
-    5. **ZERO-INFLATION / SPARSITY** — Approx. zero fraction by run: `{summary.get("points", {}).get("approx_sparsity", "n/a")}`.  
-    6. **BATCH EFFECTS** — Silhouette (batch/group) KPIs are tracked per run; inspect combined run if created.
-                """
-            )
-
-    # ---- Files
-    with tabs[6]:
-        colA, colB = st.columns(2)
-        with colA:
-            st.write("**Core Tables**")
-            core_files = [
-                ("Combined Expression", os.path.join(out["outdir"], "expression_combined.tsv")),
-                ("Harmonized Expression", os.path.join(out["outdir"], "expression_harmonized.tsv")),
-                ("PCA Scores", os.path.join(out["outdir"], "pca_scores.tsv")),
-                ("Metadata (aligned)", os.path.join(out["outdir"], "metadata.tsv")),
-                ("Report (JSON)", out["report_json"]),
-            ]
-            for label, path in core_files:
-                if os.path.exists(path):
-                    with open(path, "rb") as fh:
-                        safe_download_button(
-                            f"⬇️ {label}",
-                            fh.read(),
-                            file_name=os.path.basename(path),
-                            mime="text/plain",
-                            use_container_width=True,
-                            key=f"dl_core__{st.session_state.run_id}__{label}",
-                        )
-        with colB:
-            try:
-                with open(out["zip"], "rb") as fh:
-                    safe_download_button(
-                        label="⬇️ Download ALL results (ZIP)",
-                        data=fh.read(),
-                        file_name="harmonization_results.zip",
-                        mime="application/zip",
-                        use_container_width=True,
-                        key=f"dl_zip__{st.session_state.run_id}",
-                    )
-            except Exception as e:
-                st.warning(f"Could not open ZIP for download: {e}")
-
-    # Cleanup temp GMT if used
-    if gmt_file:
-        shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
-
-
+                colA, colB = st.columns(2)
+                with colA:
+                    st.write("**Core Tables**")
+                    core_files = [
+                        ("Combined Expression", os.path.join(out_curr["outdir"], "expression_combined.tsv")),
+                        ("Harmonized Expression", os.path.join(out_curr["outdir"], "expression_harmonized.tsv")),
+                        ("PCA Scores", os.path.join(out_curr["outdir"], "pca_scores.tsv")),
+                        ("Metadata (aligned)", os.path.join(out_curr["outdir"], "metadata.tsv")),
+                        ("Report (JSON)", out_curr["report_json"]),
+                    ]
+                    for label, path in core_files:
+                        if os.path.exists(path):
+                            with open(path, "rb") as fh:
+                                safe_download_button(
+                                    f"⬇️ {label}",
+                                    fh.read(),
+                                    file_name=os.path.basename(path),
+                                    mime="text/plain",
+                                    use_container_width=True,
+                                    key=f"dl_core__{run_id}__{label}",
+                                )
+                with colB:
+                    try:
+                        with open(out_curr["zip"], "rb") as fh:
+                            safe_download_button(
+                                label="⬇️ Download ALL results (ZIP)",
+                                data=fh.read(),
+                                file_name="harmonization_results.zip",
+                                mime="application/zip",
+                                use_container_width=True,
+                                key=f"dl_zip__{run_id}",
+                            )
+                    except Exception as e:
+                        st.warning(f"Could not open ZIP for download: {e}")
