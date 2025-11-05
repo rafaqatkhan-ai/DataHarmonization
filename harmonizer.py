@@ -70,6 +70,194 @@ try:
     _HAVE_TSNE = True
 except Exception:
     pass
+# ==== NEW: light I/O helpers for in-memory runs ==============================
+def _df_to_tsv_bytesio(df: pd.DataFrame) -> io.BytesIO:
+    bio = io.BytesIO()
+    df.to_csv(bio, sep="\t")
+    bio.seek(0)
+    return bio
+
+def _read_prep_counts_any(buf_or_path) -> pd.DataFrame:
+    # Allow TSV/CSV/XLSX; index=genes/features, columns=samples
+    is_pathlike = isinstance(buf_or_path, (str, os.PathLike))
+    def _read_csv(x, sep=None):
+        if is_pathlike:
+            return pd.read_csv(x, sep=sep)
+        b = _as_bytesio(x); b.seek(0); return pd.read_csv(b, sep=sep)
+    def _read_xlsx(x):
+        if is_pathlike:
+            return pd.read_excel(x, engine="openpyxl")
+        b = _as_bytesio(x); b.seek(0); return pd.read_excel(b, engine="openpyxl")
+
+    name = str(buf_or_path).lower()
+    if name.endswith((".tsv",".txt")):
+        df = _read_csv(buf_or_path, sep="\t")
+    elif name.endswith(".csv"):
+        df = _read_csv(buf_or_path, sep=None)
+    elif name.endswith((".xlsx",".xls")):
+        df = _read_xlsx(buf_or_path)
+    else:
+        # try excel then csv autodetect
+        try:
+            df = _read_xlsx(buf_or_path)
+        except Exception:
+            df = _read_csv(buf_or_path, sep=None)
+
+    # Normalize like read_expression_any does
+    df = df.dropna(how="all").dropna(axis=1, how="all")
+    lower = [str(c).strip().lower() for c in df.columns]
+    gene_col = None
+    for key in ["biomarkers","biomarker","marker","gene","feature","id","name"]:
+        if key in lower:
+            gene_col = df.columns[lower.index(key)]
+            break
+    if gene_col is None: gene_col = df.columns[0]
+    df = df.rename(columns={gene_col: "Biomarker"}).set_index("Biomarker")
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df.index = df.index.astype(str).str.strip().str.upper().str.replace(r'\.\d+$', '', regex=True)
+    return df.groupby(level=0).median(numeric_only=True)
+
+def _read_prep_meta_any(buf_or_path) -> pd.DataFrame:
+    # Accept TSV/CSV/XLSX; must contain some ID column; we leave column naming to app
+    return _read_metadata_any(buf_or_path, name_hint=str(buf_or_path))
+
+# ==== NEW: multi-GEO orchestrator ============================================
+def run_pipeline_multi(
+    datasets: List[Dict[str, object]],
+    *,
+    attempt_combine: bool = True,
+    combine_minoverlap_genes: int = 3000,
+    out_root: str = "out_multi",
+    pca_topk_features: int = 5000,
+    make_nonlinear: bool = True,
+) -> Dict[str, object]:
+    """
+    datasets: list of dicts like:
+        {"geo": "GSE273902", "counts": <BytesIO|path>, "meta": <BytesIO|path>, "meta_id_cols": [...], "meta_group_cols": [...], "meta_batch_col": None|str}
+    Returns:
+        {
+          "runs": { GEO: {...run_pipeline return...} },
+          "combined": {...run_pipeline return...} or None,
+          "combine_decision": {"combined": bool, "reason": str, "overlap_genes": int, "platforms": {...}}
+        }
+    """
+    os.makedirs(out_root, exist_ok=True)
+    # Load each dataset to profile compatibility
+    loaded = []
+    platforms = {}
+    data_types = {}
+    gene_sets = []
+    for ds in datasets:
+        geo = ds.get("geo") or f"DS_{len(loaded)+1}"
+        X = _read_prep_counts_any(ds["counts"])
+        M = _read_prep_meta_any(ds["meta"])
+        # name samples uniquely by dataset to avoid collisions
+        X.columns = [f"{geo}__{c}" for c in X.columns]
+        # basic detect
+        dtype, platform, diags = detect_data_type_and_platform(X)
+        platforms[geo] = platform
+        data_types[geo] = dtype
+        gene_sets.append(set(X.index))
+        loaded.append({"geo": geo, "X": X, "M": M, "dtype": dtype, "platform": platform, "diags": diags,
+                       "meta_id_cols": ds.get("meta_id_cols"), "meta_group_cols": ds.get("meta_group_cols"),
+                       "meta_batch_col": ds.get("meta_batch_col")})
+
+    # Decide if we can combine
+    combine_ok = False
+    reason = ""
+    if attempt_combine and len(loaded) >= 2:
+        same_dtype = len(set(d["dtype"] for d in loaded)) == 1
+        # For platform, allow "Microarray (Illumina/Affy)" group as the same; else require identical strings
+        plat_set = set(d["platform"] for d in loaded)
+        plat_ok = (len(plat_set) == 1) or (plat_set <= {"Microarray (Illumina/Affy)"})
+        overlap = len(set.intersection(*gene_sets)) if gene_sets else 0
+        if not same_dtype:
+            reason = "Different detected data types"
+        elif not plat_ok:
+            reason = "Incompatible platforms"
+        elif overlap < combine_minoverlap_genes:
+            reason = f"Too few overlapping genes (<{combine_minoverlap_genes})"
+        else:
+            combine_ok = True
+            reason = "All checks passed"
+    else:
+        overlap = 0
+        reason = "Combination disabled or single dataset"
+
+    runs = {}
+    combined_run = None
+    # If combinable, build unified matrices and one metadata
+    if combine_ok:
+        # Intersect genes to be safe across platforms
+        common = set.intersection(*gene_sets)
+        # keep a stable order
+        common = pd.Index(sorted(common))
+        Xs = []
+        metas = []
+        for d in loaded:
+            Xi = d["X"].loc[common].copy()
+            # Build a light scaffold metadata: we just pass the uploaded meta file and tell run_pipeline how to match
+            # We'll keep per-dataset metadata mapping inside the app by providing id columns
+            # Here we create a minimal metadata df aligned by sample 'bare_id'
+            bare_ids = [c.split("__",1)[1] for c in Xi.columns]
+            meta_scaffold = pd.DataFrame({"bare_id": bare_ids, "sample": Xi.columns}).set_index("sample")
+            metas.append(meta_scaffold)
+            Xs.append(Xi)
+        X_comb = pd.concat(Xs, axis=1)
+        meta_comb = pd.concat(metas, axis=0)
+        # Create BytesIOs and dispatch to run_pipeline (single-file mode + custom metadata)
+        expr_io = _df_to_tsv_bytesio(X_comb.reset_index().rename(columns={"index":"Biomarker"}))
+        meta_io = _df_to_tsv_bytesio(meta_comb.reset_index())
+        # We’ll ask run_pipeline to identify 'bare_id' automatically through best-overlap fallback
+        combined_outdir = os.path.join(out_root, "combined")
+        combined_res = run_pipeline(
+            single_expression_file=expr_io,
+            single_expression_name_hint="combined.tsv",
+            metadata_file=meta_io,
+            metadata_name_hint="combined_meta.tsv",
+            metadata_id_cols=["bare_id","Bare_ID","id","ID","sample","Sample"],
+            metadata_group_cols=["group","Group","condition","Condition","phenotype","Phenotype"],
+            metadata_batch_col=None,
+            out_root=combined_outdir,
+            pca_topk_features=pca_topk_features,
+            make_nonlinear=make_nonlinear,
+        )
+        runs["COMBINED"] = combined_res
+        combined_run = combined_res
+
+    # Always also make per-dataset runs (so you can compare)
+    for d in loaded:
+        geo = d["geo"]
+        expr_io = _df_to_tsv_bytesio(d["X"].reset_index().rename(columns={"index":"Biomarker"}))
+        # pass through original meta and generous id/group candidates
+        meta_io = io.BytesIO(); d["M"].to_csv(meta_io, index=False, sep="\t"); meta_io.seek(0)
+        outdir = os.path.join(out_root, geo)
+        res = run_pipeline(
+            single_expression_file=expr_io,
+            single_expression_name_hint=f"{geo}.tsv",
+            metadata_file=meta_io,
+            metadata_name_hint=f"{geo}_meta.tsv",
+            metadata_id_cols=d.get("meta_id_cols") or ["bare_id","Id","ID","id","sample","Sample","SampleID","Sample_ID"],
+            metadata_group_cols=d.get("meta_group_cols") or ["group","Group","condition","Condition","phenotype","Phenotype"],
+            metadata_batch_col=d.get("meta_batch_col"),
+            out_root=outdir,
+            pca_topk_features=pca_topk_features,
+            make_nonlinear=make_nonlinear,
+        )
+        runs[geo] = res
+
+    return {
+        "runs": runs,
+        "combined": combined_run,
+        "combine_decision": {
+            "combined": bool(combined_run is not None),
+            "reason": reason,
+            "overlap_genes": int(overlap),
+            "platforms": platforms,
+            "data_types": data_types,
+        }
+    }
 
 # ---------------- Config defaults ----------------
 ZERO_INFLATION_THRESH = 0.4
@@ -1103,6 +1291,7 @@ def run_pipeline(
         "report_json": os.path.join(OUTDIR, "report.json"),
         "zip": zip_path
     }
+
 
 
 
