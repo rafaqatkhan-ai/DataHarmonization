@@ -376,7 +376,8 @@ if run:
         st.metric("Silhouette (batch)", f'{sil_batch:.2f}' if isinstance(sil_batch, (int, float)) else "—")
         st.markdown('<div class="smallcaps">Lower is better</div></div>', unsafe_allow_html=True)
 
-    tabs = st.tabs(["Overview", "QC", "PCA & Embeddings", "DE & GSEA", "Outliers", "Files"])
+    tabs = st.tabs(["Overview", "QC", "PCA & Embeddings", "DE & GSEA", "Outliers", "Multi-GEO", "Files"])
+
 
     # ---- Overview
     with tabs[0]:
@@ -530,9 +531,107 @@ if run:
                     st.warning(f"Could not load outliers for this run: {e}")
             else:
                 st.info("No outlier table found for this run.")
+    # ---- Multi-GEO (NEW)
+    with tabs[5]:
+        st.write("### Batch-run up to 5 GEO datasets (each with `prep_counts` and `prep_meta`)")
+        st.caption(
+            "Tip: counts = gene x sample table; meta = clinical/phenotype table. IDs should map to sample names (or provide candidate ID columns).")
+
+        max_sets = 5
+        attempt_combine = st.checkbox("Attempt to combine into one run when compatible", value=True)
+        min_overlap = st.number_input("Minimum overlapping genes required to combine", 1000, 20000, 3000, step=500)
+
+        geo_rows = []
+        for i in range(max_sets):
+            with st.expander(f"Dataset {i + 1}", expanded=(i == 0)):
+                geo = st.text_input(f"GEO ID (optional, label only) #{i + 1}", key=f"geo_id_{i}",
+                                    value="" if i > 0 else "GSE273902")
+                cfile = st.file_uploader("prep_counts (TSV/CSV/XLSX)", type=["tsv", "txt", "csv", "xlsx", "xls"],
+                                         key=f"counts_{i}")
+                mfile = st.file_uploader("prep_meta (TSV/CSV/XLSX)", type=["tsv", "txt", "csv", "xlsx", "xls"],
+                                         key=f"meta_{i}")
+                idc = st.text_input("Candidate ID columns in meta (comma-sep)", "bare_id,Id,ID,id,sample,Sample",
+                                    key=f"idcols_{i}")
+                grpc = st.text_input("Candidate GROUP columns in meta (comma-sep)",
+                                     "group,Group,condition,Condition,phenotype,Phenotype", key=f"grpcols_{i}")
+                bcol = st.text_input("Batch column (optional)", "", key=f"bcol_{i}")
+                if cfile and mfile:
+                    geo_rows.append({
+                        "geo": (geo.strip() or f"DS{i + 1}"),
+                        "counts": io.BytesIO(cfile.getvalue()),
+                        "meta": io.BytesIO(mfile.getvalue()),
+                        "meta_id_cols": [c.strip() for c in idc.split(",") if c.strip()],
+                        "meta_group_cols": [c.strip() for c in grpc.split(",") if c.strip()],
+                        "meta_batch_col": (bcol.strip() or None),
+                    })
+
+        run_multi = safe_button("🚀 Run Multi-GEO Harmonization", use_container_width=True, key="run_multi_geo_btn")
+
+        if run_multi:
+            if not geo_rows:
+                st.error("Please add at least one dataset with both files.")
+                st.stop()
+            # Wire into the new multi runner
+            try:
+                with st.spinner("Running multi-dataset analysis..."):
+                    multi_res = run_pipeline_multi(
+                        datasets=geo_rows,
+                        attempt_combine=attempt_combine,
+                        combine_minoverlap_genes=int(min_overlap),
+                        out_root=os.path.join(out_dir, "multi_geo"),
+                        pca_topk_features=int(pca_topk),
+                        make_nonlinear=do_nonlinear,
+                    )
+                st.success("Multi-dataset processing complete.")
+                # Persist so we can show summary without recomputing
+                st.session_state.multi_geo = multi_res
+            except Exception as e:
+                st.error(f"Multi-GEO run failed: {e}")
+
+        # Summary + downloads if available
+        if "multi_geo" in st.session_state and st.session_state.multi_geo:
+            multi_res = st.session_state.multi_geo
+            st.write("#### Combination decision")
+            dec = multi_res.get("combine_decision", {})
+            st.json(dec)
+
+            # Show per-dataset ZIP downloaders + combined if present
+            st.write("#### Results per dataset")
+            cols = st.columns(3)
+            i = 0
+            for name, res in (multi_res.get("runs") or {}).items():
+                pzip = res.get("zip")
+                if pzip and os.path.exists(pzip):
+                    with cols[i % 3]:
+                        with open(pzip, "rb") as fh:
+                            safe_download_button(f"⬇️ {name} (ZIP)", fh.read(), file_name=f"{name}_results.zip",
+                                                 mime="application/zip",
+                                                 key=f"dl_zip_{name}_{st.session_state.run_token}")
+                i += 1
+
+            # Diabetes-style cross-dataset analysis bullets
+            try:
+                summary = summarize_multi_results(multi_res)
+            except Exception:
+                summary = {}
+
+            st.write("### Cross-dataset analysis (Diabetes example framing)")
+            st.markdown(
+                f"""
+    1. **TISSUE HOMOGENEITY** — All datasets are expected to be **human pancreatic islets** (confirm in uploaded clinical metadata).  
+    2. **PLATFORM DIVERSITY** — Observed platforms: `{", ".join(sorted(set(summary.get("platforms", {}).values()))) or "n/a"}`.  
+       Mixed RNA-seq / microarray demands careful normalization; cross-platform **validation** increases robustness.  
+    3. **SAMPLE SIZE VARIATION** — Samples per dataset: `{summary.get("sizes", {})}`.  
+       Use per-contrast power checks; DE is skipped if groups < 2 samples each.  
+    4. **CLINICAL HETEROGENEITY** — Harmonize **T2D status, HbA1c, BMI** to unified definitions across GEOs.  
+       Consider covariate adjustment or stratified DE if distributions differ.  
+    5. **ZERO-INFLATION / SPARSITY** — Approx. zero fraction by run: `{summary.get("points", {}).get("approx_sparsity", "n/a")}`.  
+    6. **BATCH EFFECTS** — Silhouette (batch/group) KPIs are tracked per run; inspect combined run if created.
+                """
+            )
 
     # ---- Files
-    with tabs[5]:
+    with tabs[6]:
         colA, colB = st.columns(2)
         with colA:
             st.write("**Core Tables**")
@@ -571,4 +670,5 @@ if run:
     # Cleanup temp GMT if used
     if gmt_file:
         shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+
 
