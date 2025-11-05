@@ -3,7 +3,7 @@
 import os, io, tempfile, shutil, json
 import streamlit as st
 import pandas as pd
-from harmonizer import run_pipeline, run_pipeline_multi, summarize_multi_results
+import harmonizer as hz
 import datetime as _dt
 
 # =========================
@@ -318,7 +318,7 @@ if run:
             run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
             kwargs["out_root"] = os.path.join(out_dir, run_id)
 
-            out = run_pipeline(**kwargs)
+            out = hz.run_pipeline(**kwargs)
 
             # Persist current run + a fresh token to break widget caches
             st.session_state.run_id = run_id
@@ -542,6 +542,10 @@ if run:
                         st.warning(f"Could not load outliers for this run: {e}")
                 else:
                     st.info("No outlier table found for this run.")
+        # Add these two lines once, before you use them
+        run_pipeline_multi = getattr(hz, "run_pipeline_multi", None)
+        summarize_multi_results = getattr(hz, "summarize_multi_results", None)
+
 
         # ---- Multi-GEO (always visible)
         with tabs[5]:
@@ -676,3 +680,4 @@ if run:
                             )
                     except Exception as e:
                         st.warning(f"Could not open ZIP for download: {e}")
+
