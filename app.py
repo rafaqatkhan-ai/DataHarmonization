@@ -5,6 +5,25 @@ import datetime as _dt
 import streamlit as st
 import pandas as pd
 import harmonizer as hz
+# Quick one-off test you can run in a Python shell
+from harmonizer import _read_10x_minimal
+import pandas as pd, tempfile, os, urllib.request, tarfile, zipfile
+
+urls = [
+    "ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM5155nnn/GSM5155196/suppl/GSM5155196_Tumor.tar.gz",
+    "ftp://ftp.ncbi.nlm.nih.gov/geo/samples/GSM5155nnn/GSM5155197/suppl/GSM5155197_Normal.tar.gz",
+]
+tmp = tempfile.mkdtemp()
+cols = []
+for url in urls:
+    local = os.path.join(tmp, os.path.basename(url))
+    urllib.request.urlretrieve(url, local)
+    # _read_10x_minimal can take an archive or folder
+    X = _read_10x_minimal(local)         # genes x cells
+    pb = X.sum(axis=1).to_frame(os.path.basename(url).split("_")[1].split(".")[0])  # Tumor/Normal col
+    cols.append(pb)
+
+expr = pd.concat(cols, axis=1, join="outer").fillna(0.0)
 
 # Streamlit compatibility shims
 # =========================
@@ -680,6 +699,7 @@ with tabs[7]:
             with open(summary_txt, "r") as fh:
                 st.write("#### Key Findings (ready to copy)")
                 st.code(fh.read(), language="markdown")
+
 
 
 
