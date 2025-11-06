@@ -1046,9 +1046,9 @@ def run_pipeline_multi(
         outdir = os.path.join(out_root, name)
         res = run_pipeline(
             single_expression_file=d["counts"],
-            single_expression_name_hint=f"{name}.tsv",
+            single_expression_name_hint=d.get("counts_name"),
             metadata_file=d["meta"],
-            metadata_name_hint=f"{name}_meta.tsv",
+            metadata_name_hint=d.get("meta_name"),   # let the reader sniff
             metadata_id_cols=d.get("meta_id_cols") or ["Id","ID","id","sample","Sample","bare_id"],
             metadata_group_cols=d.get("meta_group_cols") or ["group","Group","condition","Condition","phenotype","Phenotype"],
             metadata_batch_col=d.get("meta_batch_col"),
@@ -1120,5 +1120,6 @@ def run_pipeline_multi(
         "summary_png_path": meta.get("summary_png_path"),
     }
     return out
+
 
 
