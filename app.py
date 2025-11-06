@@ -109,7 +109,7 @@ st.markdown("""
 .centered-title{font-size:2.6rem;font-weight:900;text-align:center;
 background:linear-gradient(90deg,#1e3a8a,#2563eb,#6366f1,#7c3aed);
 background-size:300% 300%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:colorShift 8s ease infinite;margin-top:-0.5rem}
-@keyframes colorShift{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+@keyframes colorShift{0%{background-position:0% 50%}50%{background-position=100% 50%}100%{background-position:0% 50%}}
 .subtitle{text-align:center;opacity:.9;font-size:1rem;margin-top:-0.6rem;font-style:italic}
 </style>
 <h1 class="centered-title"><span>🧬</span> Data Harmonization & QC Suite <span>🧬</span></h1>
@@ -125,6 +125,9 @@ mode = st.radio(
     horizontal=True
 )
 st.caption("Upload expression data and corresponding metadata, then click **Run Harmonization**.")
+
+
+
 
 # ---------------- Expression upload ----------------
 single_expr_file = None
@@ -603,3 +606,4 @@ with tabs[7]:
             with open(summary_txt, "r") as fh:
                 st.write("#### Key Findings (ready to copy)")
                 st.code(fh.read(), language="markdown")
+
