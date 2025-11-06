@@ -175,54 +175,122 @@ def _pseudo_bulk_by_gene(adata, level: str = None):
 
 def _collect_supplementary_paths(gse_root_dir: str):
     """
-    Find candidate supplementary files for each GSM under the downloaded folder.
-    Returns {gsm: [paths...]}.
+    Recursively find candidate supplementary files anywhere under the GSE root.
+    Returns {gsm: [paths...]} mapping where keys are GSM IDs if detectable,
+    otherwise the files are attached to a pseudo key equal to their parent dir.
     """
+    exts = (".h5", ".hdf5", ".loom", ".mtx", ".mtx.gz", ".tar.gz", ".tgz", ".zip")
     sup = {}
-    for gsm_dir in glob.glob(os.path.join(gse_root_dir, "GSM*")):
-        gsm = os.path.basename(gsm_dir)
-        files = []
-        for ext in ("*.h5", "*.hdf5", "*.loom", "*.mtx", "*.mtx.gz", "*.tar.gz", "*.tgz", "*.zip"):
-            files.extend(glob.glob(os.path.join(gsm_dir, "**", ext), recursive=True))
-        sup[gsm] = files
+    for root, _, files in os.walk(gse_root_dir):
+        for fname in files:
+            f = os.path.join(root, fname)
+            if not f.lower().endswith(exts):
+                continue
+            # best-effort GSM inference from path
+            m = re.search(r"(GSM\d+)", f, re.IGNORECASE)
+            gsm = m.group(1).upper() if m else os.path.basename(os.path.dirname(f))
+            sup.setdefault(gsm, []).append(f)
     return sup
+def _read_10x_minimal(path: str):
+    """
+    Minimal 10x reader without scanpy/anndata.
+    Supports directories with matrix.mtx(.gz), features/genes(.tsv[.gz]), barcodes(.tsv[.gz]).
+    Returns a (genes x cells) dense DataFrame.
+    """
+    import gzip
+    from scipy.io import mmread
+
+    def _open(p):
+        return gzip.open(p, 'rt') if p.endswith(".gz") else open(p, 'r')
+
+    # Allow passing an archive; if so, extract to a temp dir
+    if os.path.isfile(path) and (tarfile.is_tarfile(path) or zipfile.is_zipfile(path)):
+        tmpd = tempfile.mkdtemp()
+        try:
+            if tarfile.is_tarfile(path):
+                with tarfile.open(path) as tf: tf.extractall(tmpd)
+            else:
+                with zipfile.ZipFile(path) as zf: zf.extractall(tmpd)
+            path = tmpd
+        except Exception:
+            shutil.rmtree(tmpd, ignore_errors=True)
+            raise
+
+    # Find matrix dir
+    cand = None
+    for root, _, files in os.walk(path):
+        if "matrix.mtx" in files or "matrix.mtx.gz" in files:
+            cand = root; break
+    if cand is None:
+        raise RuntimeError("matrix.mtx not found")
+
+    # Resolve filenames
+    mtx = os.path.join(cand, "matrix.mtx.gz") if os.path.exists(os.path.join(cand,"matrix.mtx.gz")) else os.path.join(cand,"matrix.mtx")
+    features = None
+    for fn in ["features.tsv.gz","features.tsv","genes.tsv.gz","genes.tsv"]:
+        p = os.path.join(cand, fn)
+        if os.path.exists(p):
+            features = p; break
+    barcodes = None
+    for fn in ["barcodes.tsv.gz","barcodes.tsv"]:
+        p = os.path.join(cand, fn)
+        if os.path.exists(p):
+            barcodes = p; break
+    if features is None or barcodes is None:
+        raise RuntimeError("features.tsv / barcodes.tsv not found")
+
+    # Load
+    M = mmread(mtx).tocsr()
+    with _open(features) as fh:
+        feats = [line.strip().split("\t")[1] if "\t" in line else line.strip() for line in fh]
+    with _open(barcodes) as fh:
+        cells = [line.strip() for line in fh]
+
+    import numpy as np
+    import pandas as pd
+    df = pd.DataFrame.sparse.from_spmatrix(M, index=feats, columns=cells).astype("float64")
+    return df
 
 def _build_from_supplementary(gse_root_dir: str):
     """
     Build pseudo-bulk expression from per-GSM 10x-like supplementary files.
     Returns (expr_df, meta_df) if successful, else (None, None).
     """
-    if not _HAVE_SCANPY:
-        return None, None
     sup = _collect_supplementary_paths(gse_root_dir)
     matrices = []
-    sample_names = []
     for gsm, paths in sup.items():
         built = False
         for p in paths:
             try:
-                adata = _read_10x_like_matrix(p if os.path.isfile(p) else os.path.dirname(p))
-                pb = _pseudo_bulk_by_gene(adata)
-                # If multiple libraries per GSM, sum them
-                if pb.shape[1] > 1:
-                    pb = pb.sum(axis=1).to_frame(gsm)
+                if _HAVE_SCANPY:
+                    adata = _read_10x_like_matrix(p if os.path.isfile(p) else os.path.dirname(p))
+                    pb = _pseudo_bulk_by_gene(adata)
                 else:
-                    pb.columns = [gsm]
+                    # minimal reader path
+                    root = p if os.path.isdir(p) else (os.path.dirname(p))
+                    X = _read_10x_minimal(root)
+                    # collapse to pseudo-bulk (sum across cells)
+                    pb = X.groupby(X.index).sum()
+                    if pb.shape[1] > 1:
+                        pb = pb.sum(axis=1).to_frame(gsm)
+                    else:
+                        pb.columns = [gsm]
+                    pb.index = pb.index.astype(str).str.upper().str.replace(r'\.\d+$','',regex=True)
                 matrices.append(pb)
-                sample_names.append(gsm)
                 built = True
                 break
             except Exception:
                 continue
         if not built:
-            # skip this GSM if no parsable supplementary
-            pass
+            continue
+
     if not matrices:
         return None, None
+
     expr = pd.concat(matrices, axis=1, join="outer").fillna(0.0)
-    # minimal metadata; you can enrich by parsing GSM SOFT if needed
     meta = pd.DataFrame({"sample": expr.columns, "group": "ALL", "bare_id": expr.columns}).set_index("sample")
     return expr, meta
+
 
 def _entrez_esearch_gds(term: str, retmax: int = 20) -> list[str]:
     """
@@ -1260,7 +1328,9 @@ def fetch_geo_as_datasets(accessions: list[str]) -> tuple[list[dict], pd.DataFra
             expr, meta = _build_from_supplementary(os.path.join(tmp_root, acc))
 
         if expr is None or meta is None or expr.empty:
-            raise RuntimeError(f"Could not construct expression matrix from GEO series {acc}.")
+            raise RuntimeError(f"Could not construct expression matrix from GEO series {acc}. "
+                               f"Tip: This often means it's single-cell without series_matrix; "
+                               f"install scanpy/anndata or enable the minimal 10x reader.")
 
         # Construct in-memory buffers compatible with run_pipeline
         expr_buf = io.BytesIO()
@@ -1617,5 +1687,6 @@ def run_pipeline_multi(
     if qa_warnings:
         out["qa_mapping_warnings"] = qa_warnings
     return out
+
 
 
