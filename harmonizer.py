@@ -358,9 +358,7 @@ def create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, figdir: st
 
     plt.figure(figsize=(12,6))
     grp_series = meta["group"] if "group" in meta.columns else pd.Series("ALL", index=meta.index)
-    groups_seen = list(pd.unique(grp_series.astype(str))))
-    # fix: remove extra parenthesis
-    groups_seen = list(pd.unique(grp_series.astype(str)))
+    groups_seen = list(pd.unique(grp_series.astype(str)))  # <-- FIXED: removed stray parenthesis
     for grp in groups_seen:
         cols = meta.index[grp_series==grp]
         vals = expr_harmonized[cols].values.ravel() if len(cols) else np.array([])
@@ -802,7 +800,7 @@ def run_pipeline(
         volcano_and_ma_plots(df, k, os.path.join(OUTDIR, "figs"))
         heatmap_top_de(expr_log2, meta, df, k, os.path.join(OUTDIR, "figs"), topn=50)
 
-    # 11) GSEA (optional) — (placeholder for future)
+    # 11) GSEA (optional)
     gsea_dir = os.path.join(OUTDIR, "gsea"); os.makedirs(gsea_dir, exist_ok=True)
 
     # 12) Save outputs
@@ -985,7 +983,6 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
         _savefig(summary_png)
     except Exception:
         summary_png = os.path.join(meta_dir, "diabetes_harmonized_analysis_comprehensive.png")
-        # still return a path; presenter will skip if missing
 
     return {
         "meta_dir": meta_dir,
