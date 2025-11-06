@@ -1,14 +1,26 @@
-# app.py — now supports multi-dataset mode + Presenter Mode + Dataset QA attachments
-import os, io, tempfile, shutil, json
-import streamlit as st
-import pandas as pd
-try:
-    import harmonizer as hz
-except Exception:
-    from core import harmonizer as hz  # works if you later move it into core/
+--- a/app.py
++++ b/app.py
+@@
+-import os, io, tempfile, shutil, json, glob, re
+-import streamlit as st
+-import pandas as pd
+-from core import harmonizer as hz
+-import datetime as _dt
++import os, io, tempfile, shutil, json, glob, re
++import streamlit as st
++import pandas as pd
++import harmonizer as hz
++import datetime as _dt
+@@
+-        if summary_txt and os.path.exists(summary_txt):
+-            with open(summary_txt, "r") as fh:
+-                st.write("#### Key Findings (ready to copy)")
+-                st.code(fh.read(), language="markdown"). harmonizer.py code: # -*- coding: utf-8 -*-
++        if summary_txt and os.path.exists(summary_txt):
++            with open(summary_txt, "r") as fh:
++                st.write("#### Key Findings (ready to copy)")
++                st.code(fh.read(), language="markdown")
 
-import datetime as _dt
-# =========================
 # Streamlit compatibility shims
 # =========================
 def safe_button(label, **kwargs):
@@ -683,6 +695,7 @@ with tabs[7]:
             with open(summary_txt, "r") as fh:
                 st.write("#### Key Findings (ready to copy)")
                 st.code(fh.read(), language="markdown")
+
 
 
 
