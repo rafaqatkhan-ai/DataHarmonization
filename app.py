@@ -1,4 +1,4 @@
-# app.py — now auto-extracts batch from meta, previews batch levels, applies ComBat
+# app.py — now supports multi-dataset mode + Presenter Mode
 import os, io, tempfile, shutil, json
 import streamlit as st
 import pandas as pd
@@ -35,6 +35,7 @@ st.set_page_config(page_title="🧬 Data Harmonization & QC Suite", page_icon="�
 if "run_id" not in st.session_state: st.session_state.run_id = None
 if "out" not in st.session_state: st.session_state.out = None
 if "run_token" not in st.session_state: st.session_state.run_token = None
+if "multi" not in st.session_state: st.session_state.multi = None
 
 # =========================
 # THEME SELECTOR (non-black)
@@ -118,10 +119,12 @@ background-size:300% 300%;-webkit-background-clip:text;-webkit-text-fill-color:t
 # =========================
 # UI CONTROLS
 # =========================
-mode = st.radio("Expression upload mode",
-    ["Single expression matrix", "Multiple files (one per group)"],
-    horizontal=True)
-st.caption("Upload expression data (single matrix **or** one file per group) and corresponding metadata, then click **Run Harmonization**.")
+mode = st.radio(
+    "Expression upload mode",
+    ["Single expression matrix", "Multiple files (one per group)", "Multiple datasets (each has its own metadata)"],
+    horizontal=True
+)
+st.caption("Upload expression data and corresponding metadata, then click **Run Harmonization**.")
 
 # ---------------- Expression upload ----------------
 single_expr_file = None
@@ -136,12 +139,12 @@ if mode == "Multiple files (one per group)":
         with col2:
             hpv_pos_file = st.file_uploader("Third (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="hpvp")
             hpv_neg_file = st.file_uploader("Fourth (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="hpvn")
-else:
+elif mode == "Single expression matrix":
     with st.expander("1) Upload Single Expression Matrix (XLSX/CSV/TSV)"):
         single_expr_file = st.file_uploader("Expression matrix", type=["xlsx","csv","tsv","txt"], key="single_expr")
 
-# ---------------- Metadata ----------------
-with st.expander("2) Upload Metadata (TSV/CSV/XLSX)"):
+# ---------------- Metadata (single/multi-group) ----------------
+with st.expander("2) Upload Metadata (TSV/CSV/XLSX) [skip this for multi-dataset mode]"):
     metadata_file = st.file_uploader("Metadata file", type=["tsv","csv","txt","xlsx"], key="meta")
 
     id_cols = st.text_input("Candidate ID columns (comma-separated)",
@@ -192,69 +195,143 @@ with st.expander("Advanced settings"):
     pca_topk = st.number_input("Top variable genes for PCA", min_value=500, max_value=50000, value=5000, step=500)
     do_nonlinear = st.checkbox("Make UMAP/t-SNE (if available)", value=True)
 
+# ---------------- NEW: Multi-dataset mode (expression+meta per dataset) ----------------
+multi_datasets = None
+combine_thresh = 3000
+if mode == "Multiple datasets (each has its own metadata)":
+    with st.expander("1) Upload Datasets (each has its own expression + metadata)"):
+        n_ds = st.number_input("How many datasets?", min_value=2, max_value=12, value=3, step=1)
+        st.caption("For each dataset, provide an expression matrix (XLSX/CSV/TSV) and a matching metadata file.")
+        multi_datasets = []
+        for i in range(int(n_ds)):
+            with st.container():
+                st.markdown(f"**Dataset {i+1}**")
+                colL, colR = st.columns([2,2])
+                with colL:
+                    ds_label = st.text_input(f"Label {i+1}", value=f"DS{i+1}", key=f"ds_label_{i}")
+                    expr_file = st.file_uploader(f"Expression {i+1}", type=["xlsx","csv","tsv","txt"], key=f"expr_{i}")
+                with colR:
+                    meta_file_i = st.file_uploader(f"Metadata {i+1}", type=["tsv","csv","txt","xlsx"], key=f"meta_{i}")
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    id_cols_i = st.text_input(f"ID columns {i+1}",
+                                              "sample,Sample,Id,ID,id,CleanID,sample_id,Sample_ID,SampleID",
+                                              key=f"idcols_{i}")
+                with c2:
+                    grp_cols_i = st.text_input(f"GROUP columns {i+1}",
+                                               "group,Group,condition,Condition,phenotype,Phenotype",
+                                               key=f"grpcols_{i}")
+                with c3:
+                    batch_col_i = st.text_input(f"Batch column (optional) {i+1}", "", key=f"batchcol_{i}")
+
+                if expr_file and meta_file_i:
+                    multi_datasets.append({
+                        "geo": ds_label.strip() or f"DS{i+1}",
+                        "counts": io.BytesIO(expr_file.getvalue()),
+                        "meta": io.BytesIO(meta_file_i.getvalue()),
+                        "meta_id_cols": [c.strip() for c in id_cols_i.split(",") if c.strip()],
+                        "meta_group_cols": [c.strip() for c in grp_cols_i.split(",") if c.strip()],
+                        "meta_batch_col": (batch_col_i.strip() or None),
+                    })
+
+    with st.expander("2) Multi-dataset settings"):
+        combine_thresh = st.number_input("Minimum overlapping genes to combine", min_value=500, max_value=100000,
+                                         value=3000, step=250,
+                                         help="If overlap ≥ this, datasets are combined; otherwise analyzed separately.")
+
 # ---------------- Run ----------------
 run = safe_button("🚀 Run Harmonization", type="primary", use_container_width=True)
 
 if run:
-    if not metadata_file:
-        st.error("Please upload a metadata file."); st.stop()
-
-    kwargs = {
-        "metadata_file": io.BytesIO(metadata_file.getvalue()),
-        "metadata_name_hint": metadata_file.name,
-        "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip()],
-        "metadata_group_cols": [c.strip() for c in grp_cols.split(",") if c.strip()],
-        "metadata_batch_col": (batch_col.strip() or None),  # None => auto-detect
-        "out_root": out_dir,
-        "pca_topk_features": int(pca_topk),
-        "make_nonlinear": do_nonlinear,
-    }
-
-    gmt_path = None
-    if gmt_file:
-        tmpdir = tempfile.mkdtemp()
-        gmt_path = os.path.join(tmpdir, gmt_file.name)
-        with open(gmt_path, "wb") as fh: fh.write(gmt_file.getvalue())
-        kwargs["gsea_gmt"] = gmt_path
-
-    if mode == "Multiple files (one per group)":
-        groups = {}
-        if normal_file: groups["First"] = io.BytesIO(normal_file.getvalue())
-        if atypia_file: groups["Second"] = io.BytesIO(atypia_file.getvalue())
-        if hpv_pos_file: groups["Third"] = io.BytesIO(hpv_pos_file.getvalue())
-        if hpv_neg_file: groups["Fourth"] = io.BytesIO(hpv_neg_file.getvalue())
-        if not groups:
-            st.error("Please upload at least one expression file."); st.stop()
-        kwargs["group_to_file"] = groups
+    if mode == "Multiple datasets (each has its own metadata)":
+        if not multi_datasets or len(multi_datasets) < 2:
+            st.error("Please provide at least two datasets (each with expression + metadata)."); st.stop()
+        kwargs_multi = {
+            "datasets": multi_datasets,
+            "attempt_combine": True,
+            "combine_minoverlap_genes": int(combine_thresh),
+            "out_root": out_dir,
+            "pca_topk_features": int(pca_topk),
+            "make_nonlinear": do_nonlinear,
+        }
+        try:
+            with st.spinner("Running multi-dataset harmonization & meta-analysis..."):
+                run_id = _dt.datetime.now().strftime("multirun_%Y%m%d_%H%M%S")
+                kwargs_multi["out_root"] = os.path.join(out_dir, run_id)
+                multi_out = hz.run_pipeline_multi(**kwargs_multi)
+                st.session_state.run_id = run_id
+                st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
+                st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
+                st.session_state.multi = multi_out
+                try:
+                    st.cache_data.clear(); st.cache_resource.clear()
+                except Exception:
+                    pass
+        except Exception as e:
+            st.error(f"Multi-dataset run failed: {e}")
+            st.stop()
     else:
-        if not single_expr_file:
-            st.error("Please upload the expression matrix."); st.stop()
-        kwargs["single_expression_file"] = io.BytesIO(single_expr_file.getvalue())
-        kwargs["single_expression_name_hint"] = single_expr_file.name
+        if not metadata_file:
+            st.error("Please upload a metadata file."); st.stop()
 
-    try:
-        with st.spinner("Running harmonization..."):
-            run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
-            kwargs["out_root"] = os.path.join(out_dir, run_id)
-            out = hz.run_pipeline(**kwargs)
-            st.session_state.run_id = run_id
-            st.session_state.out = out
-            st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
-            try:
-                st.cache_data.clear(); st.cache_resource.clear()
-            except Exception:
-                pass
-    except Exception as e:
-        st.error(f"Run failed: {e}")
+        kwargs = {
+            "metadata_file": io.BytesIO(metadata_file.getvalue()),
+            "metadata_name_hint": metadata_file.name,
+            "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip()],
+            "metadata_group_cols": [c.strip() for c in grp_cols.split(",") if c.strip()],
+            "metadata_batch_col": (batch_col.strip() or None),  # None => auto-detect
+            "out_root": out_dir,
+            "pca_topk_features": int(pca_topk),
+            "make_nonlinear": do_nonlinear,
+        }
+
+        gmt_path = None
         if gmt_file:
-            shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
-        st.stop()
+            tmpdir = tempfile.mkdtemp()
+            gmt_path = os.path.join(tmpdir, gmt_file.name)
+            with open(gmt_path, "wb") as fh: fh.write(gmt_file.getvalue())
+            kwargs["gsea_gmt"] = gmt_path
+
+        if mode == "Multiple files (one per group)":
+            groups = {}
+            if normal_file: groups["First"] = io.BytesIO(normal_file.getvalue())
+            if atypia_file: groups["Second"] = io.BytesIO(atypia_file.getvalue())
+            if hpv_pos_file: groups["Third"] = io.BytesIO(hpv_pos_file.getvalue())
+            if hpv_neg_file: groups["Fourth"] = io.BytesIO(hpv_neg_file.getvalue())
+            if not groups:
+                st.error("Please upload at least one expression file."); st.stop()
+            kwargs["group_to_file"] = groups
+        else:
+            if not single_expr_file:
+                st.error("Please upload the expression matrix."); st.stop()
+            kwargs["single_expression_file"] = io.BytesIO(single_expr_file.getvalue())
+            kwargs["single_expression_name_hint"] = single_expr_file.name
+
+        try:
+            with st.spinner("Running harmonization..."):
+                run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
+                kwargs["out_root"] = os.path.join(out_dir, run_id)
+                out = hz.run_pipeline(**kwargs)
+                st.session_state.run_id = run_id
+                st.session_state.out = out
+                st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
+                try:
+                    st.cache_data.clear(); st.cache_resource.clear()
+                except Exception:
+                    pass
+        except Exception as e:
+            st.error(f"Run failed: {e}")
+            if gmt_file:
+                shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+            st.stop()
 
 # =========================
 # RESULTS (always visible)
 # =========================
 st.subheader("Results")
-tabs = st.tabs(["Overview","QC","PCA & Embeddings","DE & GSEA","Outliers","Files"])
+
+# Rebuild tabs (added Multi Summary + Presenter Mode)
+tabs = st.tabs(["Overview","QC","PCA & Embeddings","DE & GSEA","Outliers","Files","Multi-dataset Summary","Presenter Mode"])
 out_curr = st.session_state.get("out"); run_id = st.session_state.get("run_id")
 
 # ---- Overview
@@ -418,3 +495,111 @@ with tabs[5]:
                                          use_container_width=True, key=f"dl_zip__{run_id}")
             except Exception as e:
                 st.warning(f"Could not open ZIP for download: {e}")
+
+# ---- Multi-dataset Summary
+with tabs[6]:
+    multi = st.session_state.get("multi")
+    if not multi:
+        st.info("No multi-dataset run in this session.")
+    else:
+        dec = multi.get("combine_decision", {}) or {}
+        st.write("### Combination decision")
+        st.json(dec)
+        if multi.get("combined"):
+            st.success("A combined run was created (sufficient gene overlap).")
+        else:
+            st.warning("Datasets were analyzed individually (insufficient overlap).")
+
+        summary_txt = multi.get("summary_txt_path")
+        summary_png = multi.get("summary_png_path")
+        outputs_zip = None
+        comb = multi.get("combined")
+        if comb:
+            outputs_zip = comb.get("zip")
+
+        if summary_txt and os.path.exists(summary_txt):
+            st.write("### Key Findings")
+            with open(summary_txt, "r") as fh:
+                st.code(fh.read(), language="markdown")
+            with open(summary_txt, "rb") as fh:
+                safe_download_button("⬇️ Download summary (TXT)", fh.read(),
+                                     file_name="final_analysis_summary.txt",
+                                     mime="text/plain", key=f"dl_summary_txt__{run_id}")
+
+        if summary_png and os.path.exists(summary_png):
+            st.image(summary_png, caption=os.path.basename(summary_png), use_column_width=True)
+
+        meta_dir = multi.get("meta_dir")
+        if meta_dir and os.path.isdir(meta_dir):
+            st.write("### Meta-analysis tables")
+            files = [
+                "deg_results_annotated.csv",
+                "meta_analysis_results.csv",
+                "upregulated_genes_meta.csv",
+                "drug_targets_analysis.csv",
+                "final_analysis_summary.csv",
+            ]
+            cols = st.columns(2)
+            for i, f in enumerate(files):
+                p = os.path.join(meta_dir, f)
+                if os.path.exists(p):
+                    with open(p, "rb") as fh:
+                        safe_download_button(f"⬇️ {f}", fh.read(), file_name=f, mime="text/csv",
+                                             use_container_width=True, key=f"dl_meta_{f}_{run_id}")
+        if outputs_zip and os.path.exists(outputs_zip):
+            with open(outputs_zip, "rb") as fh:
+                safe_download_button("⬇️ Download ALL combined results (ZIP)", fh.read(),
+                                     file_name="harmonization_results.zip", mime="application/zip",
+                                     use_container_width=True, key=f"dl_zip_multi__{run_id}")
+
+# ---- Presenter Mode (clean, board-friendly summary)
+with tabs[7]:
+    st.markdown("### 🎤 Presenter Mode")
+    st.caption("A concise, visual summary for stakeholders. (Auto-populates after a multi-dataset run.)")
+
+    multi = st.session_state.get("multi")
+    if not multi:
+        st.info("Run a **multi-dataset** analysis to enable Presenter Mode.")
+    else:
+        summary_txt = multi.get("summary_txt_path")
+        summary_png = multi.get("summary_png_path")
+        meta_dir = multi.get("meta_dir")
+        dec = multi.get("combine_decision", {}) or {}
+        n_datasets = len(multi.get("runs", {}))
+        overlap = dec.get("overlap_genes", 0)
+        combined = dec.get("combined", False)
+
+        met_csv = os.path.join(meta_dir, "meta_analysis_results.csv") if meta_dir else None
+        sig_count = up_count = 0
+        top_rows = []
+        if met_csv and os.path.exists(met_csv):
+            try:
+                mdf = pd.read_csv(met_csv, index_col=0)
+                sig = mdf[mdf["q_meta"] < 0.10]
+                sig_count = int(sig.shape[0])
+                up_count = int(((sig["meta_log2FC_proxy"] > 0) & (sig["consistency"] >= 0.6)).sum())
+                top_rows = mdf.sort_values("q_meta").head(10)
+            except Exception:
+                pass
+
+        # Header KPIs
+        k1,k2,k3,k4 = st.columns(4)
+        with k1: st.metric("Datasets", n_datasets)
+        with k2: st.metric("Overlap genes", f"{overlap:,}")
+        with k3: st.metric("Combined run", "Yes" if combined else "No")
+        with k4: st.metric("Significant genes (FDR<0.1)", f"{sig_count:,}")
+
+        # Hero plot
+        if summary_png and os.path.exists(summary_png):
+            st.image(summary_png, caption="Comprehensive Meta-analysis Overview", use_column_width=True)
+
+        # Top candidates
+        if len(top_rows):
+            st.write("#### Top biomarker candidates (meta)")
+            st.dataframe(top_rows[["z_meta","p_meta","q_meta","consistent_dir","consistency","meta_log2FC_proxy"]], use_container_width=True)
+
+        # Narrative
+        if summary_txt and os.path.exists(summary_txt):
+            with open(summary_txt, "r") as fh:
+                st.write("#### Key Findings (ready to copy)")
+                st.code(fh.read(), language="markdown")
