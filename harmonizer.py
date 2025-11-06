@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
-# harmonizer.py — single-dataset pipeline + Multi-GEO wrapper + meta-analysis + presenter assets + GEO fetch
-
+# harmonizer.py — single-dataset pipeline + Multi-GEO wrapper + meta-analysis + presenter assets + dataset QA I/O
 import os, re, io, json, warnings, zipfile, tempfile
 from typing import Dict, Tuple, List, Iterable, Optional, Any
 import numpy as np
@@ -39,7 +38,6 @@ try:
     _HAVE_TSNE = True
 except Exception:
     pass
-
 # ---------------- Config ----------------
 ZERO_INFLATION_THRESH = 0.4
 MICROARRAY_RANGE_MAX  = 20.0
@@ -1752,6 +1750,7 @@ def run_pipeline_multi(
     if qa_warnings:
         out["qa_mapping_warnings"] = qa_warnings
     return out
+
 
 
 
