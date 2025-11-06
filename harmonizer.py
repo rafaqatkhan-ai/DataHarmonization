@@ -156,86 +156,69 @@ def build_metadata_from_columns(columns: List[str], groups_from_prefix: bool = T
 def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFrame:
     """
     Robustly read metadata from Excel or delimited text (CSV/TSV/TXT) with delimiter sniffing.
-    Works even if a .txt file is actually comma-separated (the cause of ['sample,condition']).
+    Works even if a .txt/.tsv file is actually comma-separated (prevents ['sample,condition']).
     """
+    import csv
     is_pathlike = isinstance(metadata_obj, (str, os.PathLike))
     suffix = (os.path.splitext(name_hint)[1].lower() if name_hint
               else (os.path.splitext(str(metadata_obj))[1].lower() if is_pathlike else ""))
 
-    # 1) Excel first (explicit)
+    # Excel first
     if suffix in (".xlsx", ".xls"):
         return (pd.read_excel(metadata_obj, engine="openpyxl")
                 if is_pathlike else pd.read_excel(_as_bytesio_seekable(metadata_obj), engine="openpyxl"))
 
-    # 2) Helper to sniff delimiter from the first couple KB
     def _peek_bytes(obj, n=4096) -> bytes:
         try:
             if isinstance(obj, (str, os.PathLike)):
                 with open(obj, "rb") as fh:
                     return fh.read(n)
-            else:
-                bio = _as_bytesio_seekable(obj)
-                pos = bio.tell()
-                b = bio.read(n)
-                bio.seek(pos)
-                return b
+            bio = _as_bytesio_seekable(obj)
+            pos = bio.tell()
+            b = bio.read(n)
+            bio.seek(pos)
+            return b
         except Exception:
             return b""
 
     def _sniff_sep(obj) -> str | None:
         sample = _peek_bytes(obj, 4096).decode(errors="ignore")
-        # obvious wins first
         if "\t" in sample and "," not in sample:
             return "\t"
         if "," in sample and "\t" not in sample:
             return ","
-        # Try csv.Sniffer if both/none present
         try:
-            import csv
             dialect = csv.Sniffer().sniff(sample, delimiters=[",", "\t", ";", "|"])
             return dialect.delimiter
         except Exception:
-            return None  # let pandas infer
+            return None
 
-    # 3) Text readers — try pandas inference first, then fallbacks
     def _read_text(obj):
-        # try pandas delimiter inference
+        # 1) pandas inference
         try:
             return pd.read_csv(obj, sep=None, engine="python")
         except Exception:
             pass
-        # try sniffed delimiter
+        # 2) sniffed delimiter
         sep = _sniff_sep(obj)
         if sep:
             try:
                 return pd.read_csv(obj, sep=sep)
             except Exception:
                 pass
-        # brute-force fallbacks
-        for sep in [",", "\t", ";", "|", r"\s+"]:
+        # 3) fallbacks
+        for sep in [",", "\t", ";", "|"]:
             try:
-                return pd.read_csv(obj, sep=sep if sep != r"\s+" else None,
-                                   engine="python" if sep == None else "python")
+                return pd.read_csv(obj, sep=sep)
             except Exception:
                 continue
-        # last resort: attempt excel again (some CSVs are mislabeled)
-        try:
-            return (pd.read_excel(obj, engine="openpyxl")
-                    if isinstance(obj, (str, os.PathLike))
-                    else pd.read_excel(_as_bytesio_seekable(obj), engine="openpyxl"))
-        except Exception as e2:
-            raise ValueError(f"Could not parse metadata with any strategy: {e2}")
+        # 4) last resort: try excel
+        return (pd.read_excel(obj, engine="openpyxl")
+                if isinstance(obj, (str, os.PathLike))
+                else pd.read_excel(_as_bytesio_seekable(obj), engine="openpyxl"))
 
-    # 4) Route for text-ish suffixes or unknowns
-    if suffix in (".csv", ".tsv", ".txt", ""):
-        return _read_text(metadata_obj if is_pathlike else _as_bytesio_seekable(metadata_obj))
-
-    # 5) Unknown suffix: try inference, then excel
-    try:
-        return _read_text(metadata_obj if is_pathlike else _as_bytesio_seekable(metadata_obj))
-    except Exception:
-        return (pd.read_excel(metadata_obj, engine="openpyxl")
-                if is_pathlike else pd.read_excel(_as_bytesio_seekable(metadata_obj), engine="openpyxl"))
+    # Route text-like / unknown suffixes through the robust reader
+    return _read_text(metadata_obj if is_pathlike else _as_bytesio_seekable(metadata_obj))
 
 
 # ---------------- Batch detection ----------------
@@ -1137,4 +1120,5 @@ def run_pipeline_multi(
         "summary_png_path": meta.get("summary_png_path"),
     }
     return out
+
 
