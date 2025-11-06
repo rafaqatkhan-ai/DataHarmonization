@@ -2,7 +2,7 @@
 import os, io, tempfile, shutil, json, glob, re
 import streamlit as st
 import pandas as pd
-from core import harmonizer as hz
+from . import harmonizer as hz
 import datetime as _dt
 
 # =========================
@@ -680,6 +680,7 @@ with tabs[7]:
             with open(summary_txt, "r") as fh:
                 st.write("#### Key Findings (ready to copy)")
                 st.code(fh.read(), language="markdown")
+
 
 
 
