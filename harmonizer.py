@@ -323,32 +323,46 @@ def _build_from_supplementary(gse_root_dir: str):
     """
     sup = _collect_supplementary_paths(gse_root_dir)
     matrices = []
+
     for gsm, paths in sup.items():
         built = False
         for p in paths:
             try:
-               if _HAVE_SCANPY:
-                adata = _read_10x_like_matrix(p if os.path.isfile(p) else os.path.dirname(p))
-                pb = _pseudo_bulk_by_gene(adata)
-            else:
-                root = p if os.path.isdir(p) else os.path.dirname(p)
-                X = _read_10x_minimal(root)
-                # pseudo-bulk by summing cells
-                pb = X.sum(axis=1).to_frame(gsm)
-                pb.index = pb.index.astype(str).str.upper().str.replace(r'\.\d+$','',regex=True)
+                if _HAVE_SCANPY:
+                    # scanpy/anndata path
+                    adata = _read_10x_like_matrix(p if os.path.isfile(p) else os.path.dirname(p))
+                    pb = _pseudo_bulk_by_gene(adata)
+                else:
+                    # minimal reader path (no scanpy)
+                    root = p if os.path.isdir(p) else os.path.dirname(p)
+                    X = _read_10x_minimal(root)
+                    # pseudo-bulk by summing cells
+                    pb = X.sum(axis=1).to_frame(gsm)
+                    pb.index = (
+                        pb.index.astype(str)
+                        .str.upper()
+                        .str.replace(r"\.\d+$", "", regex=True)
+                    )
+
                 matrices.append(pb)
                 built = True
-                break
+                break  # done with this GSM once one path worked
             except Exception:
+                # try next candidate path for this GSM
                 continue
+
         if not built:
+            # nothing worked for this GSM; move on
             continue
 
     if not matrices:
         return None, None
 
     expr = pd.concat(matrices, axis=1, join="outer").fillna(0.0)
-    meta = pd.DataFrame({"sample": expr.columns, "group": "ALL", "bare_id": expr.columns}).set_index("sample")
+    meta = (
+        pd.DataFrame({"sample": expr.columns, "group": "ALL", "bare_id": expr.columns})
+        .set_index("sample")
+    )
     return expr, meta
 
 
@@ -1750,6 +1764,7 @@ def run_pipeline_multi(
     if qa_warnings:
         out["qa_mapping_warnings"] = qa_warnings
     return out
+
 
 
 
