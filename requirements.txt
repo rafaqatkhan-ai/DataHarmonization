@@ -1,12 +1,12 @@
-GEOparse
+streamlit
 pandas
 numpy
-scikit-learn
 matplotlib
-openpyxl
-streamlit
+scikit-learn
 scipy
-gseapy          # optional but used for GSEA if provided
-scanpy          # optional; enables ComBat
-anndata         # optional; for scanpy
-umap-learn      # optional; enables UMAP plots
+openpyxl
+GEOparse
+umap-learn
+anndata
+scanpy
+gseapy
