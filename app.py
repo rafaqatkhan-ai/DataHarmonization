@@ -1,10 +1,9 @@
-# app.py — supports multi-dataset mode + Presenter Mode + direct GEO fetch + QA wiring
-#import harmonizer as hz
-import os, io, tempfile, shutil, json, glob, re
+# app.py — now supports multi-dataset mode + Presenter Mode + Dataset QA attachments
+import os, io, tempfile, shutil, json
 import streamlit as st
 import pandas as pd
+import harmonizer as hz
 import datetime as _dt
-
 # =========================
 # Streamlit compatibility shims
 # =========================
@@ -680,6 +679,7 @@ with tabs[7]:
             with open(summary_txt, "r") as fh:
                 st.write("#### Key Findings (ready to copy)")
                 st.code(fh.read(), language="markdown")
+
 
 
 
