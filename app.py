@@ -259,11 +259,36 @@ if mode == "Multiple datasets (each has its own metadata)":
                     st.session_state.eval_json = eval_json
                 except Exception as e:
                     st.error(f"GEO fetch failed: {e}")
+                        # ---- Merge any datasets queued from the keyword search panel ----
+    queued = st.session_state.get("geo_datasets_queue") or []
+    if queued:
+        st.info(f"Also including {len(queued)} dataset(s) fetched from GEO search.")
+        multi_datasets.extend(queued)
 
     with st.expander("3) Multi-dataset settings"):
         combine_thresh = st.number_input("Minimum overlapping genes to combine", min_value=500, max_value=100000,
                                          value=3000, step=250,
                                          help="If overlap ≥ this, datasets are combined; otherwise analyzed separately.")
+# ==== NEW: GEO search & fetch by keywords/name (not just GSE IDs) ====
+with st.expander("Fetch datasets from GEO by name/keywords"):
+    q = st.text_input("Enter disease/dataset keywords (e.g., 'cervical cancer')", value="")
+    n_top = st.number_input("How many datasets to fetch (top N)", min_value=1, max_value=10, value=2, step=1)
+    st.caption("Tip: You can also paste exact GSE IDs like 'GSE168652, GSE10072'.")
+    add_btn = safe_button("🔎 Search GEO & queue datasets", use_container_width=True)
+
+    if add_btn:
+        try:
+            queries = [q] if q.strip() else []
+            datasets, ds_summary_df, eval_rows = hz.prepare_datasets_from_geo_queries(queries, max_per_query=int(n_top))
+
+            # Stash for use in multi-dataset mode
+            st.session_state.setdefault("geo_datasets_queue", [])
+            st.session_state["geo_datasets_queue"].extend(datasets)
+            st.session_state.ds_summary_df = ds_summary_df
+            st.session_state.eval_json = eval_rows
+            st.success(f"Queued {len(datasets)} dataset(s) from GEO search.")
+        except Exception as e:
+            st.error(f"GEO search failed: {e}")
 
 # ---------------- Run ----------------
 run = safe_button("🚀 Run Harmonization", type="primary", use_container_width=True)
@@ -272,17 +297,19 @@ if run:
     if mode == "Multiple datasets (each has its own metadata)":
         if not multi_datasets or len(multi_datasets) < 2:
             st.error("Please provide at least two datasets (each with expression + metadata)."); st.stop()
-        kwargs_multi = {
-            "datasets": multi_datasets,
-            "attempt_combine": True,
-            "combine_minoverlap_genes": int(combine_thresh),
-            "out_root": out_dir,
-            "pca_topk_features": int(pca_topk),
-            "make_nonlinear": do_nonlinear,
-            # pass QA artifacts if present (from auto-discovery or GEO fetch)
-            "dataset_summary_df": st.session_state.get("ds_summary_df"),
-            "evaluation_results_json": st.session_state.get("eval_json"),
-        }
+# When constructing kwargs_multi right before hz.run_pipeline_multi(...)
+    kwargs_multi = {
+        "datasets": multi_datasets,
+        "attempt_combine": True,
+        "combine_minoverlap_genes": int(combine_thresh),
+        "out_root": out_dir,
+        "pca_topk_features": int(pca_topk),
+        "make_nonlinear": do_nonlinear,
+        # NEW: wire QA artifacts (optional; saved per-dataset and combined)
+        "dataset_summary_df": st.session_state.get("ds_summary_df"),
+        "evaluation_results_json": st.session_state.get("eval_json"),
+    }    
+
         # try auto-discover QA artifacts if not set
         if kwargs_multi["dataset_summary_df"] is None:
             for pat in ["/mnt/data/dataset_summary*.csv", "/mnt/data/dataset_summary*.tsv", "/mnt/data/dataset_summary*.*"]:
@@ -653,3 +680,4 @@ with tabs[7]:
             with open(summary_txt, "r") as fh:
                 st.write("#### Key Findings (ready to copy)")
                 st.code(fh.read(), language="markdown")
+
