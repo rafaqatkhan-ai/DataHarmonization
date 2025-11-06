@@ -51,6 +51,178 @@ import re, time, xml.etree.ElementTree as ET
 from typing import Sequence
 
 _GSE_RE = re.compile(r"^GSE\d+$", re.IGNORECASE)
+# ==== GEO matrix builders & fallbacks ====
+import gzip, glob, tarfile, zipfile
+from io import BytesIO
+
+def _series_to_expression_and_meta(gse):
+    """
+    Try the in-memory Series object first (bulk only).
+    Returns (expr_df, meta_df) or (None, None) if not possible.
+    """
+    try:
+        # pivot_samples('VALUE') exists only for bulk-style matrices
+        expr = gse.pivot_samples('VALUE')
+        expr.index = expr.index.astype(str).str.strip().str.upper().str.replace(r'\.\d+$','',regex=True)
+        expr = expr.apply(pd.to_numeric, errors='coerce')
+        # metadata from GSMs
+        rows = []
+        for gsm_name, gsm in gse.gsms.items():
+            ch = gsm.metadata
+            rows.append({
+                "sample": gsm_name,
+                "group": (ch.get("characteristics_ch1", ["ALL"])[0] if "characteristics_ch1" in ch else "ALL"),
+                "bare_id": gsm_name,
+                "tissue_type": "; ".join([x for x in ch.get("characteristics_ch1", []) if "tissue" in x.lower()]) if "characteristics_ch1" in ch else "",
+                "library_strategy": ", ".join(ch.get("library_strategy", [])) if "library_strategy" in ch else "",
+                "extraction_protocol": ", ".join(ch.get("extraction_protocol_ch1", [])) if "extraction_protocol_ch1" in ch else "",
+            })
+        meta = pd.DataFrame(rows).set_index("sample")
+        # Align meta to expression columns
+        meta = meta.reindex(expr.columns).fillna({"group": "ALL", "bare_id": ""})
+        return expr, meta
+    except Exception:
+        return None, None
+
+def _parse_series_matrix_file(path: str):
+    """
+    Parse a downloaded *series_matrix.txt.gz if present.
+    """
+    try:
+        with gzip.open(path, 'rt', encoding='utf-8', errors='ignore') as fh:
+            df = pd.read_csv(fh, sep="\t", comment="!", low_memory=False)
+        # Find gene column & sample columns
+        # Commonly first col is ID_REF / Gene symbol etc.
+        gene_col = df.columns[0]
+        df = df.rename(columns={gene_col: "Biomarker"}).set_index("Biomarker")
+        # Keep only numeric cols
+        for c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna(axis=1, how="all")
+        expr = df
+        expr.index = expr.index.astype(str).str.strip().str.upper().str.replace(r'\.\d+$','',regex=True)
+        # Minimal meta (we’ll enrich later from GSM SOFT if available)
+        meta = pd.DataFrame({"sample": expr.columns, "group": "ALL", "bare_id": expr.columns}).set_index("sample")
+        return expr, meta
+    except Exception:
+        return None, None
+
+def _read_10x_like_matrix(mtx_dir_or_file: str):
+    """
+    Read 10x/MTX/H5/loom and return AnnData (requires scanpy/anndata).
+    """
+    if not (_HAVE_SCANPY):
+        raise RuntimeError("scanpy/anndata not installed; cannot parse single-cell supplementary files.")
+    adata = None
+    path = mtx_dir_or_file
+    try:
+        # H5 10x
+        if os.path.isfile(path) and path.lower().endswith((".h5", ".hdf5")):
+            adata = sc.read_10x_h5(path)
+        # Loom
+        elif os.path.isfile(path) and path.lower().endswith(".loom"):
+            adata = sc.read_loom(path)
+        # MTX folder or tar/zip with MTX
+        elif os.path.isdir(path):
+            # Expect matrix.mtx + barcodes.tsv + features/genes.tsv
+            adata = sc.read_10x_mtx(path, var_names='gene_symbols', cache=False)
+        else:
+            # try extracting archives into a temp dir and re-read
+            tmpd = tempfile.mkdtemp()
+            try:
+                if tarfile.is_tarfile(path):
+                    with tarfile.open(path) as tf: tf.extractall(tmpd)
+                elif zipfile.is_zipfile(path):
+                    with zipfile.ZipFile(path) as zf: zf.extractall(tmpd)
+                # find folder containing matrix.mtx
+                cand = None
+                for root, _, files in os.walk(tmpd):
+                    if "matrix.mtx" in files:
+                        cand = root; break
+                if cand is None:
+                    raise RuntimeError("Could not locate matrix.mtx inside archive.")
+                adata = sc.read_10x_mtx(cand, var_names='gene_symbols', cache=False)
+            finally:
+                shutil.rmtree(tmpd, ignore_errors=True)
+    except Exception as e:
+        raise
+    if adata is None:
+        raise RuntimeError("Unsupported 10x format.")
+    return adata
+
+def _pseudo_bulk_by_gene(adata, level: str = None):
+    """
+    Collapse single-cell counts to pseudo-bulk per sample (or per GSM if available).
+    If adata.obs has 'sample' or 'GSM', use that; otherwise collapse all cells to one column.
+    """
+    obs_keys = list(adata.obs.columns)
+    key = None
+    for k in ["sample", "Sample", "GSM", "gsm", "library", "orig.ident"]:
+        if k in obs_keys:
+            key = k; break
+    if key is None:
+        # one pseudo-bulk for all cells
+        counts = pd.DataFrame(adata.X.toarray() if hasattr(adata.X, "toarray") else adata.X,
+                              columns=adata.var_names).sum(axis=0).to_frame("S1").T
+    else:
+        df = pd.DataFrame(adata.X.toarray() if hasattr(adata.X, "toarray") else adata.X,
+                          columns=adata.var_names)
+        df[key] = adata.obs[key].astype(str).values
+        counts = df.groupby(key).sum().T
+    counts.index = counts.index.astype(str).str.upper()
+    counts.index = counts.index.str.replace(r'\.\d+$','',regex=True)
+    return counts
+
+def _collect_supplementary_paths(gse_root_dir: str):
+    """
+    Find candidate supplementary files for each GSM under the downloaded folder.
+    Returns {gsm: [paths...]}.
+    """
+    sup = {}
+    for gsm_dir in glob.glob(os.path.join(gse_root_dir, "GSM*")):
+        gsm = os.path.basename(gsm_dir)
+        files = []
+        for ext in ("*.h5", "*.hdf5", "*.loom", "*.mtx", "*.mtx.gz", "*.tar.gz", "*.tgz", "*.zip"):
+            files.extend(glob.glob(os.path.join(gsm_dir, "**", ext), recursive=True))
+        sup[gsm] = files
+    return sup
+
+def _build_from_supplementary(gse_root_dir: str):
+    """
+    Build pseudo-bulk expression from per-GSM 10x-like supplementary files.
+    Returns (expr_df, meta_df) if successful, else (None, None).
+    """
+    if not _HAVE_SCANPY:
+        return None, None
+    sup = _collect_supplementary_paths(gse_root_dir)
+    matrices = []
+    sample_names = []
+    for gsm, paths in sup.items():
+        built = False
+        for p in paths:
+            try:
+                adata = _read_10x_like_matrix(p if os.path.isfile(p) else os.path.dirname(p))
+                pb = _pseudo_bulk_by_gene(adata)
+                # If multiple libraries per GSM, sum them
+                if pb.shape[1] > 1:
+                    pb = pb.sum(axis=1).to_frame(gsm)
+                else:
+                    pb.columns = [gsm]
+                matrices.append(pb)
+                sample_names.append(gsm)
+                built = True
+                break
+            except Exception:
+                continue
+        if not built:
+            # skip this GSM if no parsable supplementary
+            pass
+    if not matrices:
+        return None, None
+    expr = pd.concat(matrices, axis=1, join="outer").fillna(0.0)
+    # minimal metadata; you can enrich by parsing GSM SOFT if needed
+    meta = pd.DataFrame({"sample": expr.columns, "group": "ALL", "bare_id": expr.columns}).set_index("sample")
+    return expr, meta
 
 def _entrez_esearch_gds(term: str, retmax: int = 20) -> list[str]:
     """
@@ -1045,85 +1217,93 @@ def _series_to_expression_and_meta(gse) -> Tuple[pd.DataFrame, pd.DataFrame]:
     expr = expr.apply(pd.to_numeric, errors='coerce')
     return expr, meta
 
-def fetch_geo_as_datasets(accessions: List[str]) -> Tuple[List[Dict[str, Any]], pd.DataFrame, List[Dict[str, Any]]]:
+def fetch_geo_as_datasets(accessions: list[str]) -> tuple[list[dict], pd.DataFrame, list[dict]]:
     """
-    Download GEO GSE accessions and convert to datasets[] usable by run_pipeline_multi.
-    Returns (datasets, dataset_summary_df, evaluation_results_json).
+    Given a list of GSE IDs, download and return a 'datasets' list compatible with run_pipeline_multi.
+    Also returns (dataset_summary_df, evaluation_json_rows).
+    Fallbacks:
+      1) in-memory Series pivot (bulk)
+      2) on-disk *series_matrix.txt.gz
+      3) supplementary single-cell (10x/MTX/H5/Loom) -> pseudo-bulk per GSM
     """
-    GEOparse = _try_import_geoparse()
-    if GEOparse is None:
-        raise RuntimeError("GEOparse is required for direct GEO fetching. Please pip install GEOparse.")
+    try:
+        import GEOparse
+    except Exception as e:
+        raise RuntimeError("GEOparse is required: pip install GEOparse") from e
 
-    datasets: List[Dict[str, Any]] = []
-    summary_rows: List[Dict[str, Any]] = []
-    eval_rows: List[Dict[str, Any]] = []
-
-    tmp_root = tempfile.mkdtemp(prefix="geo_")
+    tmp_root = tempfile.mkdtemp(prefix="geo_dl_")
+    datasets = []
+    eval_rows = []
+    summary_rows = []
 
     for acc in accessions:
-        gse = GEOparse.get_GEO(geo=acc, destdir=tmp_root, how='quick')
+        acc = acc.strip().upper()
+        if not re.fullmatch(r"GSE\d+", acc):
+            raise RuntimeError(f"Invalid accession: {acc}")
+
+        # Download everything to maximize chances of finding data
+        gse = GEOparse.get_GEO(geo=acc, destdir=tmp_root, how='full')  # << important
+        # Try pivot from memory
         expr, meta = _series_to_expression_and_meta(gse)
 
-        # heuristics for group assignment
-        meta = meta.copy()
-        meta.index.name = 'sample'
-        meta['group'] = 'ALL'
-        for col in meta.columns:
-            if any(x in col for x in ['disease','status','phenotype','group']):
-                cand = meta[col].astype(str).str.lower()
-                meta.loc[cand.str.contains('control|healthy|normal', na=False), 'group'] = 'Control'
-                meta.loc[cand.str.contains('case|disease|patient|tumou|cancer|lesion', na=False), 'group'] = 'Disease'
-        meta['bare_id'] = meta.index
+        # Fall back to any series_matrix file on disk
+        if expr is None or meta is None or expr.empty:
+            sm_files = glob.glob(os.path.join(tmp_root, acc, "*series_matrix.txt.gz")) + \
+                       glob.glob(os.path.join(tmp_root, "*series_matrix.txt.gz"))
+            for f in sm_files:
+                expr, meta = _parse_series_matrix_file(f)
+                if expr is not None and not expr.empty:
+                    break
 
-        # write expression + meta to in-memory TSVs
+        # Last resort: build from supplementary single-cell files (pseudo-bulk)
+        if expr is None or meta is None or expr.empty:
+            expr, meta = _build_from_supplementary(os.path.join(tmp_root, acc))
+
+        if expr is None or meta is None or expr.empty:
+            raise RuntimeError(f"Could not construct expression matrix from GEO series {acc}.")
+
+        # Construct in-memory buffers compatible with run_pipeline
         expr_buf = io.BytesIO()
-        expr_to_write = expr.copy()
-        expr_to_write.insert(0, 'Biomarker', expr_to_write.index)
-        expr_to_write.to_csv(expr_buf, sep='\t', index=False); expr_buf.seek(0)
+        expr_w = expr.copy()
+        expr_w.insert(0, "Biomarker", expr_w.index)
+        expr_w.to_csv(expr_buf, sep="\t", index=False)
+        expr_buf.seek(0)
 
         meta_buf = io.BytesIO()
-        meta_reset = meta.reset_index()
-        meta_reset.to_csv(meta_buf, sep='\t', index=False); meta_buf.seek(0)
+        meta_reset = meta.reset_index().rename(columns={"index":"sample"})
+        meta_reset.to_csv(meta_buf, sep="\t", index=False)
+        meta_buf.seek(0)
 
+        ds_label = acc
         datasets.append({
-            'geo': acc,
-            'dataset_id': acc,
-            'counts': expr_buf,
-            'counts_name': f'{acc}_expr.tsv',
-            'meta': meta_buf,
-            'meta_name': f'{acc}_meta.tsv',
-            'meta_id_cols': ['sample','Sample','Id','ID','bare_id'],
-            'meta_group_cols': ['group','Group','phenotype','Phenotype','disease status','status'],
-            'meta_batch_col': None,
+            "geo": ds_label,
+            "dataset_id": acc,
+            "counts": expr_buf,
+            "meta": meta_buf,
+            "meta_id_cols": ["sample","Sample","Id","ID","bare_id"],
+            "meta_group_cols": ["group","Group","condition","Condition","phenotype","Phenotype"],
+            "meta_batch_col": None,  # set later if you want to treat 'dataset_id' as batch
         })
 
-        # dataset_summary row (best-effort)
+        # fill summary/eval rows (best-effort)
         summary_rows.append({
-            'user query': '',
-            'tissue type requested': '',
-            'experiment type requested': getattr(gse, 'type', [''])[0] if getattr(gse, 'type', None) else '',
-            'data set id': acc,
-            'no of samples': len(gse.gsms),
-            'no of sample validting the condition': int((meta['group'] != 'ALL').sum()),
-            'sample tissue type': '',
-            'sample characteristics': '; '.join(sorted([c for c in meta.columns if str(c).startswith('characteristics')])),
-            'library strategy': '',
-            'extractedprotocol': '',
+            "data set id": acc,
+            "n_genes": int(expr.shape[0]),
+            "n_samples": int(expr.shape[1]),
+            "source": "GEO",
+            "library_strategy": ";".join(sorted(set(meta_reset.get("library_strategy", pd.Series()).astype(str)))),
         })
-
-        # placeholder evaluation row (caller may override with real evaluation)
         eval_rows.append({
-            'dataset_id': acc,
-            'status': 'fetched',
-            'notes': 'Auto-generated by GEO fetch; replace with real evaluation if available.'
+            "dataset_id": acc,
+            "source": "GEO",
+            "download_ok": True,
+            "constructed_matrix": True,
         })
 
-    ds_df = pd.DataFrame(summary_rows)
-    low_map = {c: c.lower() for c in ds_df.columns}
-    ds_df.rename(columns=low_map, inplace=True)
-    for c in _DEF_META_COLS:
-        if c not in ds_df.columns: ds_df[c] = ''
-    return datasets, ds_df[_DEF_META_COLS].rename(columns=_DEF_META_RENAMES), eval_rows
+    # Build dataset_summary df and eval json
+    ds_summary_df = pd.DataFrame(summary_rows) if len(summary_rows) else pd.DataFrame()
+    return datasets, ds_summary_df, eval_rows
+
 
 # ---------------- Multi-GEO wrapper + meta-analysis ----------------
 def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_thresh: float = 0.10) -> Dict:
@@ -1437,4 +1617,5 @@ def run_pipeline_multi(
     if qa_warnings:
         out["qa_mapping_warnings"] = qa_warnings
     return out
+
 
