@@ -46,6 +46,117 @@ MICROARRAY_RANGE_MAX  = 20.0
 VAR_EPS = 1e-12
 HOUSEKEEPING_GENES = ["ACTB","GAPDH","RPLP0","B2M","HPRT1","PGK1","TBP","GUSB"]
 SEX_MARKERS = {"female":["XIST"], "male":["RPS4Y1","KDM5D","UTY"]}
+# ==== NEW: Search GEO by name/keywords and turn them into GSE IDs ====
+import re, time, xml.etree.ElementTree as ET
+from typing import Sequence
+
+_GSE_RE = re.compile(r"^GSE\d+$", re.IGNORECASE)
+
+def _entrez_esearch_gds(term: str, retmax: int = 20) -> list[str]:
+    """
+    Query NCBI E-utilities (db=gds) with a free-text term and return matching GSE accessions.
+    We prefer GSE (Series) records. No API key required for light usage.
+    """
+    import urllib.parse, urllib.request
+
+    # Prefer GSE records: term + gse[Filter]
+    composed = f"({term}) AND gse[Filter]"
+    params = {
+        "db": "gds",
+        "term": composed,
+        "retmax": str(retmax),
+        "retmode": "xml",
+    }
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        xml = resp.read()
+
+    root = ET.fromstring(xml)
+    ids = [idtag.text for idtag in root.findall(".//IdList/Id") if idtag.text]
+    if not ids:
+        return []
+
+    # For each GDS (or GSE) ID, fetch the GSE accession via esummary (or efetch)
+    gse_list = []
+    chunks = [ids[i:i+50] for i in range(0, len(ids), 50)]
+    for chunk in chunks:
+        params = {
+            "db": "gds",
+            "id": ",".join(chunk),
+            "retmode": "xml",
+        }
+        url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?" + urllib.parse.urlencode(params)
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            xml2 = resp.read()
+        root2 = ET.fromstring(xml2)
+        for doc in root2.findall(".//DocSum"):
+            acc = None
+            # Try to read the “Accession” item or “GSE” field
+            for itm in doc.findall("./Item"):
+                if itm.get("Name") in ("Accession", "GSE") and itm.text:
+                    acc = itm.text.strip()
+                    break
+            if acc and _GSE_RE.match(acc):
+                gse_list.append(acc.upper())
+    # Dedup while preserving order
+    seen = set(); out = []
+    for g in gse_list:
+        if g not in seen:
+            out.append(g); seen.add(g)
+    return out
+
+def search_geo_gse_by_query(query: str, max_results: int = 2, organism_hint: str | None = None) -> list[str]:
+    """
+    Given a free-text query (dataset name/disease), return up to max_results GSE accessions.
+    If the query already contains valid GSE IDs, we pass them through directly.
+    """
+    # If the user typed explicit GSE IDs, use them
+    tokens = re.split(r"[,\s]+", query.strip())
+    explicit = [t.upper() for t in tokens if _GSE_RE.match(t)]
+    if explicit:
+        # respect max_results if provided
+        return list(dict.fromkeys(explicit))[:max_results]
+
+    # Otherwise, search GDS with the query
+    gses = _entrez_esearch_gds(query, retmax=max_results * 6 or 20)
+
+    # Optional light filtering by organism in title/text (best-effort)
+    if organism_hint and gses:
+        organism_hint = organism_hint.strip().lower()
+        # (Quick heuristic: keep order and prefer those that include the organism name in accession summary label)
+        # For simplicity, we just return the top-of-list; real filtering would require extra esummary parsing.
+        pass
+
+    # Keep the top max_results
+    return gses[:max_results]
+
+def prepare_datasets_from_geo_queries(queries_or_names: Sequence[str],
+                                      max_per_query: int = 2) -> tuple[list[dict], pd.DataFrame, list[dict]]:
+    """
+    Accepts a list of free-text queries or dataset names.
+    For each query, finds up to max_per_query GSEs; merges unique GSEs; then calls fetch_geo_as_datasets.
+    """
+    all_gses: list[str] = []
+    for q in queries_or_names:
+        q = (q or "").strip()
+        if not q: continue
+        found = search_geo_gse_by_query(q, max_results=max_per_query)
+        all_gses.extend(found)
+        # be polite with NCBI
+        time.sleep(0.34)
+
+    # Deduplicate while preserving order
+    unique_gses = []
+    seen = set()
+    for g in all_gses:
+        if g not in seen:
+            unique_gses.append(g); seen.add(g)
+
+    if not unique_gses:
+        raise RuntimeError("No GEO Series (GSE) results found for your query/queries.")
+
+    # Reuse the existing downloader
+    return fetch_geo_as_datasets(unique_gses)
 
 # ---------------- Helpers ----------------
 def _collapse_dupes_df_by_index(df: pd.DataFrame, how_num: str = "median", keep: str = "first") -> pd.DataFrame:
@@ -1326,3 +1437,4 @@ def run_pipeline_multi(
     if qa_warnings:
         out["qa_mapping_warnings"] = qa_warnings
     return out
+
