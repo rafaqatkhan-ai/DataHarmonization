@@ -1,5 +1,5 @@
-# app.py — now supports multi-dataset mode + Presenter Mode + Dataset QA attachments
-import os, io, tempfile, shutil, json
+# app.py — supports multi-dataset mode + Presenter Mode + direct GEO fetch + QA wiring
+import os, io, tempfile, shutil, json, glob, re
 import streamlit as st
 import pandas as pd
 import harmonizer as hz
@@ -36,6 +36,10 @@ if "run_id" not in st.session_state: st.session_state.run_id = None
 if "out" not in st.session_state: st.session_state.out = None
 if "run_token" not in st.session_state: st.session_state.run_token = None
 if "multi" not in st.session_state: st.session_state.multi = None
+
+# cache for QA artifacts (dataset summary + evaluation)
+if "ds_summary_df" not in st.session_state: st.session_state.ds_summary_df = None
+if "eval_json" not in st.session_state: st.session_state.eval_json = None
 
 # =========================
 # THEME SELECTOR (non-black)
@@ -166,8 +170,6 @@ with st.expander("2) Upload Metadata (TSV/CSV/XLSX) [skip this for multi-dataset
                 mprev = pd.read_csv(bio, sep=None, engine="python")
             st.caption(f"Detected metadata columns: {list(mprev.columns)}")
 
-            # Batch preview (auto-guess with same logic as harmonizer)
-            from collections import Counter
             _BATCH_HINTS = ["batch","Batch","BATCH","center","Center","site","Site","location","Location","series","Series",
                             "geo_series","GEO_series","run","Run","lane","Lane","plate","Plate","sequencer","Sequencer",
                             "flowcell","Flowcell","library","Library","library_prep","LibraryPrep","study","Study","project",
@@ -189,88 +191,6 @@ with st.expander("2) Upload Metadata (TSV/CSV/XLSX) [skip this for multi-dataset
 with st.expander("3) Optional: GSEA gene set (.gmt)"):
     gmt_file = st.file_uploader("Gene set GMT (optional)", type=["gmt"])
 
-# ---------------- NEW: Dataset QA attachments (summary + evaluation) ----------------
-with st.expander("4) Optional: Dataset QA files (summary CSV/XLSX + evaluation JSON)"):
-    ds_summary_file = st.file_uploader("Dataset Summary (CSV/TSV/XLSX/TXT)", type=["csv","tsv","txt","xlsx","xls"], key="ds_summary")
-    eval_json_file = st.file_uploader("Evaluation Results (JSON)", type=["json"], key="eval_json")
-
-    # expected canonical column names (with alias matching)
-    EXPECTED = {
-        "user query": ["input query","query","user query"],
-        "tissue type requested": ["tissue requested","requested tissue","tissue type requested"],
-        "experiment type requested": ["experiment requested","assay requested","experiment type requested"],
-        "data set id": ["dataset id","geo accession","gse","accession id","series id","data set id"],
-        "no of samples": ["n samples","samples","no. of samples","no of samples"],
-        "no of samples validating the condition": ["validated samples","n validating","no of sample validting the condition"],
-        "sample tissue type": ["tissue type","tissue","sample tissue type"],
-        "sample characteristics": ["other characteristics","characteristics","sample characteristics"],
-        "library strategy": ["strategy","library_strategy","library strategy"],
-        "extractedprotocol": ["extraction protocol","extractionprotocol","extractedprotocol"],
-    }
-
-    def _read_table_any(upload):
-        import pandas as pd, io
-        name = upload.name.lower()
-        bio = io.BytesIO(upload.getvalue())
-        if name.endswith((".xlsx",".xls")):
-            return pd.read_excel(bio, engine="openpyxl")
-        if name.endswith((".tsv",".txt")):
-            return pd.read_csv(bio, sep="\t")
-        return pd.read_csv(bio, sep=None, engine="python")
-
-    def _normalize_cols(df):
-        def norm(s): return str(s).strip().lower()
-        cols = list(df.columns)
-        mapping = {}
-        for need, aliases in EXPECTED.items():
-            targets = [norm(a) for a in aliases+[need]]
-            for c in cols:
-                if norm(c) in targets:
-                    mapping[c] = need
-                    break
-        out = df.rename(columns=mapping).copy()
-        for need in EXPECTED.keys():
-            if need not in out.columns:
-                out[need] = None
-        return out
-
-    ds_df = None
-    if ds_summary_file is not None:
-        try:
-            raw = _read_table_any(ds_summary_file)
-            ds_df = _normalize_cols(raw)
-            st.success("Dataset summary loaded.")
-            st.dataframe(ds_df.head(20), use_container_width=True)
-            missing = [k for k in EXPECTED if k not in raw.columns]
-            if missing:
-                st.info("Normalized columns created/filled: " + ", ".join(missing))
-        except Exception as e:
-            st.error(f"Could not read dataset summary: {e}")
-
-    eval_obj = None
-    if eval_json_file is not None:
-        try:
-            import json, io
-            eval_obj = json.loads(io.BytesIO(eval_json_file.getvalue()).read().decode("utf-8"))
-            import pandas as pd
-            rows = []
-            for item in (eval_obj if isinstance(eval_obj, list) else [eval_obj]):
-                pm = (item.get("primary_metrics") or {})
-                rows.append({
-                    "dataset_id": item.get("dataset_id"),
-                    "suitability_score": pm.get("suitability_score"),
-                    "tissue_match": pm.get("tissue_match"),
-                    "sample_coverage": pm.get("sample_coverage"),
-                })
-            st.success("Evaluation results loaded.")
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
-        except Exception as e:
-            st.error(f"Could not read evaluation JSON: {e}")
-
-    # stash in session for use during run
-    if ds_df is not None: st.session_state.ds_summary_df = ds_df
-    if eval_obj is not None: st.session_state.eval_json = eval_obj
-
 # ---------------- Advanced ----------------
 with st.expander("Advanced settings"):
     out_dir = st.text_input("Output directory", "out")
@@ -278,13 +198,12 @@ with st.expander("Advanced settings"):
     do_nonlinear = st.checkbox("Make UMAP/t-SNE (if available)", value=True)
 
 # ---------------- NEW: Multi-dataset mode (expression+meta per dataset) ----------------
-multi_datasets = None
+multi_datasets = []
 combine_thresh = 3000
 if mode == "Multiple datasets (each has its own metadata)":
     with st.expander("1) Upload Datasets (each has its own expression + metadata)"):
         n_ds = st.number_input("How many datasets?", min_value=2, max_value=12, value=3, step=1)
         st.caption("For each dataset, provide an expression matrix (XLSX/CSV/TSV) and a matching metadata file.")
-        multi_datasets = []
         for i in range(int(n_ds)):
             with st.container():
                 st.markdown(f"**Dataset {i+1}**")
@@ -294,6 +213,12 @@ if mode == "Multiple datasets (each has its own metadata)":
                     expr_file = st.file_uploader(f"Expression {i+1}", type=["xlsx","csv","tsv","txt"], key=f"expr_{i}")
                 with colR:
                     meta_file_i = st.file_uploader(f"Metadata {i+1}", type=["tsv","csv","txt","xlsx"], key=f"meta_{i}")
+                ds_id = st.text_input(
+                    f"Dataset ID / GEO Accession {i+1}",
+                    value=(ds_label.strip() or f"DS{i+1}"),
+                    help="Maps this dataset to GEO QA files (matches 'data set id'/'dataset_id').",
+                    key=f"dsid_{i}"
+                )
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     id_cols_i = st.text_input(f"ID columns {i+1}",
@@ -309,6 +234,7 @@ if mode == "Multiple datasets (each has its own metadata)":
                 if expr_file and meta_file_i:
                     multi_datasets.append({
                         "geo": ds_label.strip() or f"DS{i+1}",
+                        "dataset_id": ds_id.strip(),
                         "counts": io.BytesIO(expr_file.getvalue()),
                         "meta": io.BytesIO(meta_file_i.getvalue()),
                         "meta_id_cols": [c.strip() for c in id_cols_i.split(",") if c.strip()],
@@ -316,7 +242,25 @@ if mode == "Multiple datasets (each has its own metadata)":
                         "meta_batch_col": (batch_col_i.strip() or None),
                     })
 
-    with st.expander("2) Multi-dataset settings"):
+    # ------- NEW: direct GEO fetch panel -------
+    with st.expander("2) Add datasets directly from GEO (GSE accessions)"):
+        st.caption("Example: GSE168652, GSE10072 — We’ll fetch series matrix, build expression & metadata.")
+        gse_text = st.text_area("GSE accessions (comma/space/newline separated)", "")
+        fetch_geo = safe_button("🔎 Fetch from GEO", type="secondary")
+        if fetch_geo and gse_text.strip():
+            accessions = [x.strip().upper() for x in re.split(r"[,\s]+", gse_text) if x.strip()]
+            with st.spinner("Downloading & parsing GEO datasets..."):
+                try:
+                    ds_list, ds_summary_df, eval_json = hz.fetch_geo_as_datasets(accessions)
+                    multi_datasets.extend(ds_list)
+                    st.success(f"Fetched {len(ds_list)} datasets from GEO.")
+                    # store global QA artifacts for the run
+                    st.session_state.ds_summary_df = ds_summary_df
+                    st.session_state.eval_json = eval_json
+                except Exception as e:
+                    st.error(f"GEO fetch failed: {e}")
+
+    with st.expander("3) Multi-dataset settings"):
         combine_thresh = st.number_input("Minimum overlapping genes to combine", min_value=500, max_value=100000,
                                          value=3000, step=250,
                                          help="If overlap ≥ this, datasets are combined; otherwise analyzed separately.")
@@ -335,10 +279,34 @@ if run:
             "out_root": out_dir,
             "pca_topk_features": int(pca_topk),
             "make_nonlinear": do_nonlinear,
-            # NEW: pass Dataset QA artifacts
+            # pass QA artifacts if present (from auto-discovery or GEO fetch)
             "dataset_summary_df": st.session_state.get("ds_summary_df"),
             "evaluation_results_json": st.session_state.get("eval_json"),
         }
+        # try auto-discover QA artifacts if not set
+        if kwargs_multi["dataset_summary_df"] is None:
+            for pat in ["/mnt/data/dataset_summary*.csv", "/mnt/data/dataset_summary*.tsv", "/mnt/data/dataset_summary*.*"]:
+                hits = glob.glob(pat)
+                if hits:
+                    try:
+                        if hits[0].lower().endswith(('.tsv', '.txt')):
+                            kwargs_multi["dataset_summary_df"] = pd.read_csv(hits[0], sep="\t")
+                        else:
+                            kwargs_multi["dataset_summary_df"] = pd.read_csv(hits[0])
+                        st.info(f"Auto-attached dataset summary from {hits[0]}")
+                        break
+                    except Exception:
+                        pass
+        if kwargs_multi["evaluation_results_json"] is None:
+            for pat in ["/mnt/data/evaluation_results*.json", "/mnt/data/*evaluation*results*.json"]:
+                hits = glob.glob(pat)
+                if hits:
+                    try:
+                        kwargs_multi["evaluation_results_json"] = json.loads(open(hits[0], "r").read())
+                        st.info(f"Auto-attached evaluation JSON from {hits[0]}")
+                        break
+                    except Exception:
+                        pass
         try:
             with st.spinner("Running multi-dataset harmonization & meta-analysis..."):
                 run_id = _dt.datetime.now().strftime("multirun_%Y%m%d_%H%M%S")
@@ -364,13 +332,10 @@ if run:
             "metadata_name_hint": metadata_file.name,
             "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip()],
             "metadata_group_cols": [c.strip() for c in grp_cols.split(",") if c.strip()],
-            "metadata_batch_col": (batch_col.strip() or None),  # None => auto-detect
+            "metadata_batch_col": (batch_col.strip() or None),
             "out_root": out_dir,
             "pca_topk_features": int(pca_topk),
             "make_nonlinear": do_nonlinear,
-            # NEW: pass Dataset QA artifacts
-            "dataset_summary_df": st.session_state.get("ds_summary_df"),
-            "evaluation_results_json": st.session_state.get("eval_json"),
         }
 
         gmt_path = None
@@ -417,12 +382,7 @@ if run:
 # RESULTS (always visible)
 # =========================
 st.subheader("Results")
-
-# Rebuild tabs (added Multi Summary + Dataset QA + Presenter Mode)
-tabs = st.tabs([
-    "Overview","QC","PCA & Embeddings","DE & GSEA","Outliers","Files",
-    "Multi-dataset Summary","Dataset QA","Presenter Mode"
-])
+tabs = st.tabs(["Overview","QC","PCA & Embeddings","DE & GSEA","Outliers","Files","Multi-dataset Summary","Presenter Mode"])
 out_curr = st.session_state.get("out"); run_id = st.session_state.get("run_id")
 
 # ---- Overview
@@ -600,6 +560,9 @@ with tabs[6]:
             st.success("A combined run was created (sufficient gene overlap).")
         else:
             st.warning("Datasets were analyzed individually (insufficient overlap).")
+        if "qa_mapping_warnings" in multi:
+            st.warning("QA mapping warnings:")
+            st.json(multi["qa_mapping_warnings"])
 
         summary_txt = multi.get("summary_txt_path")
         summary_png = multi.get("summary_png_path")
@@ -643,45 +606,8 @@ with tabs[6]:
                                      file_name="harmonization_results.zip", mime="application/zip",
                                      use_container_width=True, key=f"dl_zip_multi__{run_id}")
 
-# ---- Dataset QA (NEW)
+# ---- Presenter Mode
 with tabs[7]:
-    if not out_curr:
-        st.info("No run loaded yet.")
-    else:
-        qa_dir = os.path.join(out_curr["outdir"], "report", "dataset_qa")
-        sum_csv = os.path.join(qa_dir, "dataset_summary_normalized.csv")
-        eval_json_path = os.path.join(qa_dir, "evaluation_results.json")
-        try:
-            if os.path.exists(sum_csv):
-                st.write("### Dataset Summary (normalized)")
-                st.dataframe(pd.read_csv(sum_csv), use_container_width=True)
-                with open(sum_csv, "rb") as fh:
-                    safe_download_button("⬇️ Download normalized summary", fh.read(),
-                                         file_name="dataset_summary_normalized.csv",
-                                         mime="text/csv", use_container_width=True, key="dl_ds_summary_norm")
-            if os.path.exists(eval_json_path):
-                with open(eval_json_path, "r") as fh:
-                    ej = json.load(fh)
-                st.write("### Evaluation Results (digest)")
-                rows = []
-                for item in (ej if isinstance(ej, list) else [ej]):
-                    pm = item.get("primary_metrics", {})
-                    rows.append({
-                        "dataset_id": item.get("dataset_id"),
-                        "suitability_score": pm.get("suitability_score"),
-                        "tissue_match": pm.get("tissue_match"),
-                        "sample_coverage": pm.get("sample_coverage"),
-                    })
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
-                with open(eval_json_path, "rb") as fh:
-                    safe_download_button("⬇️ Download evaluation JSON", fh.read(),
-                                         file_name="evaluation_results.json",
-                                         mime="application/json", use_container_width=True, key="dl_eval_json")
-        except Exception as e:
-            st.warning(f"Could not render Dataset QA: {e}")
-
-# ---- Presenter Mode (clean, board-friendly summary)
-with tabs[8]:
     st.markdown("### 🎤 Presenter Mode")
     st.caption("A concise, visual summary for stakeholders. (Auto-populates after a multi-dataset run.)")
 
@@ -710,23 +636,19 @@ with tabs[8]:
             except Exception:
                 pass
 
-        # Header KPIs
         k1,k2,k3,k4 = st.columns(4)
         with k1: st.metric("Datasets", n_datasets)
         with k2: st.metric("Overlap genes", f"{overlap:,}")
         with k3: st.metric("Combined run", "Yes" if combined else "No")
         with k4: st.metric("Significant genes (FDR<0.1)", f"{sig_count:,}")
 
-        # Hero plot
         if summary_png and os.path.exists(summary_png):
             st.image(summary_png, caption="Comprehensive Meta-analysis Overview", use_column_width=True)
 
-        # Top candidates
         if len(top_rows):
             st.write("#### Top biomarker candidates (meta)")
-            st.dataframe(top_rows[["z_meta","p_meta","q_meta","consistent_dir","consistency","meta_log2FC_proxy"]], use_container_width=True)
+            st.dataframe(top_rows[["z_meta","p_meta","q_meta","consistent_dir","consistency","meta_log2FC_proxy"]], use_column_width=True)
 
-        # Narrative
         if summary_txt and os.path.exists(summary_txt):
             with open(summary_txt, "r") as fh:
                 st.write("#### Key Findings (ready to copy)")
