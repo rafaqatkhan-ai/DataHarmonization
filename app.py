@@ -297,18 +297,18 @@ if run:
     if mode == "Multiple datasets (each has its own metadata)":
         if not multi_datasets or len(multi_datasets) < 2:
             st.error("Please provide at least two datasets (each with expression + metadata)."); st.stop()
-# When constructing kwargs_multi right before hz.run_pipeline_multi(...)
-    kwargs_multi = {
-        "datasets": multi_datasets,
-        "attempt_combine": True,
-        "combine_minoverlap_genes": int(combine_thresh),
-        "out_root": out_dir,
-        "pca_topk_features": int(pca_topk),
-        "make_nonlinear": do_nonlinear,
-        # NEW: wire QA artifacts (optional; saved per-dataset and combined)
-        "dataset_summary_df": st.session_state.get("ds_summary_df"),
-        "evaluation_results_json": st.session_state.get("eval_json"),
-    }    
+        # When constructing kwargs_multi right before hz.run_pipeline_multi(...)
+        kwargs_multi = {
+            "datasets": multi_datasets,
+            "attempt_combine": True,
+            "combine_minoverlap_genes": int(combine_thresh),
+            "out_root": out_dir,
+            "pca_topk_features": int(pca_topk),
+            "make_nonlinear": do_nonlinear,
+            # NEW: wire QA artifacts (optional; saved per-dataset and combined)
+            "dataset_summary_df": st.session_state.get("ds_summary_df"),
+            "evaluation_results_json": st.session_state.get("eval_json"),
+            }    
 
         # try auto-discover QA artifacts if not set
         if kwargs_multi["dataset_summary_df"] is None:
@@ -680,4 +680,5 @@ with tabs[7]:
             with open(summary_txt, "r") as fh:
                 st.write("#### Key Findings (ready to copy)")
                 st.code(fh.read(), language="markdown")
+
 
