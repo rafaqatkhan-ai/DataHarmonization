@@ -1,4 +1,4 @@
-# app.py — now supports multi-dataset mode + Presenter Mode
+# app.py — now supports multi-dataset mode + Presenter Mode + Dataset QA attachments
 import os, io, tempfile, shutil, json
 import streamlit as st
 import pandas as pd
@@ -126,9 +126,6 @@ mode = st.radio(
 )
 st.caption("Upload expression data and corresponding metadata, then click **Run Harmonization**.")
 
-
-
-
 # ---------------- Expression upload ----------------
 single_expr_file = None
 normal_file = atypia_file = hpv_pos_file = hpv_neg_file = None
@@ -191,6 +188,88 @@ with st.expander("2) Upload Metadata (TSV/CSV/XLSX) [skip this for multi-dataset
 # ---------------- Optional GSEA ----------------
 with st.expander("3) Optional: GSEA gene set (.gmt)"):
     gmt_file = st.file_uploader("Gene set GMT (optional)", type=["gmt"])
+
+# ---------------- NEW: Dataset QA attachments (summary + evaluation) ----------------
+with st.expander("4) Optional: Dataset QA files (summary CSV/XLSX + evaluation JSON)"):
+    ds_summary_file = st.file_uploader("Dataset Summary (CSV/TSV/XLSX/TXT)", type=["csv","tsv","txt","xlsx","xls"], key="ds_summary")
+    eval_json_file = st.file_uploader("Evaluation Results (JSON)", type=["json"], key="eval_json")
+
+    # expected canonical column names (with alias matching)
+    EXPECTED = {
+        "user query": ["input query","query","user query"],
+        "tissue type requested": ["tissue requested","requested tissue","tissue type requested"],
+        "experiment type requested": ["experiment requested","assay requested","experiment type requested"],
+        "data set id": ["dataset id","geo accession","gse","accession id","series id","data set id"],
+        "no of samples": ["n samples","samples","no. of samples","no of samples"],
+        "no of samples validating the condition": ["validated samples","n validating","no of sample validting the condition"],
+        "sample tissue type": ["tissue type","tissue","sample tissue type"],
+        "sample characteristics": ["other characteristics","characteristics","sample characteristics"],
+        "library strategy": ["strategy","library_strategy","library strategy"],
+        "extractedprotocol": ["extraction protocol","extractionprotocol","extractedprotocol"],
+    }
+
+    def _read_table_any(upload):
+        import pandas as pd, io
+        name = upload.name.lower()
+        bio = io.BytesIO(upload.getvalue())
+        if name.endswith((".xlsx",".xls")):
+            return pd.read_excel(bio, engine="openpyxl")
+        if name.endswith((".tsv",".txt")):
+            return pd.read_csv(bio, sep="\t")
+        return pd.read_csv(bio, sep=None, engine="python")
+
+    def _normalize_cols(df):
+        def norm(s): return str(s).strip().lower()
+        cols = list(df.columns)
+        mapping = {}
+        for need, aliases in EXPECTED.items():
+            targets = [norm(a) for a in aliases+[need]]
+            for c in cols:
+                if norm(c) in targets:
+                    mapping[c] = need
+                    break
+        out = df.rename(columns=mapping).copy()
+        for need in EXPECTED.keys():
+            if need not in out.columns:
+                out[need] = None
+        return out
+
+    ds_df = None
+    if ds_summary_file is not None:
+        try:
+            raw = _read_table_any(ds_summary_file)
+            ds_df = _normalize_cols(raw)
+            st.success("Dataset summary loaded.")
+            st.dataframe(ds_df.head(20), use_container_width=True)
+            missing = [k for k in EXPECTED if k not in raw.columns]
+            if missing:
+                st.info("Normalized columns created/filled: " + ", ".join(missing))
+        except Exception as e:
+            st.error(f"Could not read dataset summary: {e}")
+
+    eval_obj = None
+    if eval_json_file is not None:
+        try:
+            import json, io
+            eval_obj = json.loads(io.BytesIO(eval_json_file.getvalue()).read().decode("utf-8"))
+            import pandas as pd
+            rows = []
+            for item in (eval_obj if isinstance(eval_obj, list) else [eval_obj]):
+                pm = (item.get("primary_metrics") or {})
+                rows.append({
+                    "dataset_id": item.get("dataset_id"),
+                    "suitability_score": pm.get("suitability_score"),
+                    "tissue_match": pm.get("tissue_match"),
+                    "sample_coverage": pm.get("sample_coverage"),
+                })
+            st.success("Evaluation results loaded.")
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        except Exception as e:
+            st.error(f"Could not read evaluation JSON: {e}")
+
+    # stash in session for use during run
+    if ds_df is not None: st.session_state.ds_summary_df = ds_df
+    if eval_obj is not None: st.session_state.eval_json = eval_obj
 
 # ---------------- Advanced ----------------
 with st.expander("Advanced settings"):
@@ -256,6 +335,9 @@ if run:
             "out_root": out_dir,
             "pca_topk_features": int(pca_topk),
             "make_nonlinear": do_nonlinear,
+            # NEW: pass Dataset QA artifacts
+            "dataset_summary_df": st.session_state.get("ds_summary_df"),
+            "evaluation_results_json": st.session_state.get("eval_json"),
         }
         try:
             with st.spinner("Running multi-dataset harmonization & meta-analysis..."):
@@ -286,6 +368,9 @@ if run:
             "out_root": out_dir,
             "pca_topk_features": int(pca_topk),
             "make_nonlinear": do_nonlinear,
+            # NEW: pass Dataset QA artifacts
+            "dataset_summary_df": st.session_state.get("ds_summary_df"),
+            "evaluation_results_json": st.session_state.get("eval_json"),
         }
 
         gmt_path = None
@@ -333,8 +418,11 @@ if run:
 # =========================
 st.subheader("Results")
 
-# Rebuild tabs (added Multi Summary + Presenter Mode)
-tabs = st.tabs(["Overview","QC","PCA & Embeddings","DE & GSEA","Outliers","Files","Multi-dataset Summary","Presenter Mode"])
+# Rebuild tabs (added Multi Summary + Dataset QA + Presenter Mode)
+tabs = st.tabs([
+    "Overview","QC","PCA & Embeddings","DE & GSEA","Outliers","Files",
+    "Multi-dataset Summary","Dataset QA","Presenter Mode"
+])
 out_curr = st.session_state.get("out"); run_id = st.session_state.get("run_id")
 
 # ---- Overview
@@ -555,8 +643,45 @@ with tabs[6]:
                                      file_name="harmonization_results.zip", mime="application/zip",
                                      use_container_width=True, key=f"dl_zip_multi__{run_id}")
 
-# ---- Presenter Mode (clean, board-friendly summary)
+# ---- Dataset QA (NEW)
 with tabs[7]:
+    if not out_curr:
+        st.info("No run loaded yet.")
+    else:
+        qa_dir = os.path.join(out_curr["outdir"], "report", "dataset_qa")
+        sum_csv = os.path.join(qa_dir, "dataset_summary_normalized.csv")
+        eval_json_path = os.path.join(qa_dir, "evaluation_results.json")
+        try:
+            if os.path.exists(sum_csv):
+                st.write("### Dataset Summary (normalized)")
+                st.dataframe(pd.read_csv(sum_csv), use_container_width=True)
+                with open(sum_csv, "rb") as fh:
+                    safe_download_button("⬇️ Download normalized summary", fh.read(),
+                                         file_name="dataset_summary_normalized.csv",
+                                         mime="text/csv", use_container_width=True, key="dl_ds_summary_norm")
+            if os.path.exists(eval_json_path):
+                with open(eval_json_path, "r") as fh:
+                    ej = json.load(fh)
+                st.write("### Evaluation Results (digest)")
+                rows = []
+                for item in (ej if isinstance(ej, list) else [ej]):
+                    pm = item.get("primary_metrics", {})
+                    rows.append({
+                        "dataset_id": item.get("dataset_id"),
+                        "suitability_score": pm.get("suitability_score"),
+                        "tissue_match": pm.get("tissue_match"),
+                        "sample_coverage": pm.get("sample_coverage"),
+                    })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                with open(eval_json_path, "rb") as fh:
+                    safe_download_button("⬇️ Download evaluation JSON", fh.read(),
+                                         file_name="evaluation_results.json",
+                                         mime="application/json", use_container_width=True, key="dl_eval_json")
+        except Exception as e:
+            st.warning(f"Could not render Dataset QA: {e}")
+
+# ---- Presenter Mode (clean, board-friendly summary)
+with tabs[8]:
     st.markdown("### 🎤 Presenter Mode")
     st.caption("A concise, visual summary for stakeholders. (Auto-populates after a multi-dataset run.)")
 
@@ -606,4 +731,3 @@ with tabs[7]:
             with open(summary_txt, "r") as fh:
                 st.write("#### Key Findings (ready to copy)")
                 st.code(fh.read(), language="markdown")
-
