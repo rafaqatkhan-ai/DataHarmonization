@@ -1362,11 +1362,13 @@ def _series_to_expression_and_meta(gse) -> Tuple[pd.DataFrame, pd.DataFrame]:
 def fetch_geo_as_datasets(accessions: list[str]) -> tuple[list[dict], pd.DataFrame, list[dict]]:
     """
     Given a list of GSE IDs, download and return a 'datasets' list compatible with run_pipeline_multi.
-    Also returns (dataset_summary_df, evaluation_json_rows).
-    Fallbacks:
-      1) in-memory Series pivot (bulk)
-      2) on-disk *series_matrix.txt.gz
-      3) supplementary single-cell (10x/MTX/H5/Loom) -> pseudo-bulk per GSM
+    Returns (datasets, dataset_summary_df, evaluation_json_rows).
+
+    Robust fallbacks:
+      1) In-memory Series pivot (bulk)
+      2) Any *series_matrix.txt.gz on disk
+      3) Supplementary single-cell (10x/MTX/H5/Loom) -> pseudo-bulk per GSM
+    Skips failing accessions (soft-fail per GSE); raises if none succeeded.
     """
     try:
         import GEOparse
@@ -1374,82 +1376,169 @@ def fetch_geo_as_datasets(accessions: list[str]) -> tuple[list[dict], pd.DataFra
         raise RuntimeError("GEOparse is required: pip install GEOparse") from e
 
     tmp_root = tempfile.mkdtemp(prefix="geo_dl_")
-    datasets = []
-    eval_rows = []
-    summary_rows = []
+    datasets: list[dict] = []
+    eval_rows: list[dict] = []
+    summary_rows: list[dict] = []
+
+    def _coerce_meta(meta_df: pd.DataFrame) -> pd.DataFrame:
+        if meta_df is None or meta_df.empty:
+            return pd.DataFrame()
+        m = meta_df.copy()
+        m.index.name = "sample" if m.index.name is None else m.index.name
+        # Lowercase columns & make safe defaults
+        m.columns = [str(c).strip() for c in m.columns]
+        if "group" not in m.columns:
+            m["group"] = "ALL"
+        if "bare_id" not in m.columns:
+            # try to use index as bare_id
+            m["bare_id"] = m.index.astype(str)
+        return m
+
+    succeeded = 0
+    failures = []
 
     for acc in accessions:
         acc = acc.strip().upper()
         if not re.fullmatch(r"GSE\d+", acc):
-            raise RuntimeError(f"Invalid accession: {acc}")
+            failures.append((acc, "Invalid accession format")); continue
 
-        # Download everything to maximize chances of finding data
-        gse = GEOparse.get_GEO(geo=acc, destdir=tmp_root, how='full')  # << important
-        # Try pivot from memory
-        expr, meta = _series_to_expression_and_meta(gse)
+        try:
+            # Be generous: how='full' downloads all, annotate_gpl often helps pivot
+            gse = GEOparse.get_GEO(geo=acc, destdir=tmp_root, how='full', annotate_gpl=True)
 
-        # Fall back to any series_matrix file on disk
-        if expr is None or meta is None or expr.empty:
-            sm_files = glob.glob(os.path.join(tmp_root, acc, "*series_matrix.txt.gz")) + \
-                       glob.glob(os.path.join(tmp_root, "*series_matrix.txt.gz"))
-            for f in sm_files:
-                expr, meta = _parse_series_matrix_file(f)
-                if expr is not None and not expr.empty:
-                    break
+            # ---------- 1) Try in-memory pivot (bulk matrices) ----------
+            expr, meta = None, None
+            try:
+                expr = gse.pivot_samples('VALUE')
+                # Minimal meta from GSM
+                rows = []
+                for gsm_name, gsm in gse.gsms.items():
+                    ch = getattr(gsm, "metadata", {})
+                    rows.append({
+                        "sample": gsm_name,
+                        "group": (ch.get("characteristics_ch1", ["ALL"])[0] if "characteristics_ch1" in ch else "ALL"),
+                        "bare_id": gsm_name,
+                        "library_strategy": ", ".join(ch.get("library_strategy", [])) if "library_strategy" in ch else "",
+                    })
+                meta = pd.DataFrame(rows).set_index("sample") if rows else pd.DataFrame(index=expr.columns)
+            except Exception:
+                expr, meta = None, None
 
-        # Last resort: build from supplementary single-cell files (pseudo-bulk)
-        if expr is None or meta is None or expr.empty:
-            expr, meta = _build_from_supplementary(os.path.join(tmp_root, acc))
+            # ---------- 2) Try any *series_matrix.txt.gz on disk ----------
+            if expr is None or expr.empty:
+                sm_files = glob.glob(os.path.join(tmp_root, acc, "*series_matrix.txt.gz")) + \
+                           glob.glob(os.path.join(tmp_root, "*", acc, "*series_matrix.txt.gz")) + \
+                           glob.glob(os.path.join(tmp_root, "*series_matrix.txt.gz"))
+                for f in sm_files:
+                    e2, m2 = _parse_series_matrix_file(f)
+                    if e2 is not None and not e2.empty:
+                        expr, meta = e2, (m2 if m2 is not None else pd.DataFrame(index=e2.columns))
+                        break
 
-        if expr is None or meta is None or expr.empty:
-            raise RuntimeError(
-            f"Could not construct expression matrix from GEO series {acc}. "
-            f"(No series_matrix and no parsable supplementary counts; "
-            f"try installing scanpy/anndata OR rely on the minimal 10x reader added.)"
-        )
+            # ---------- 3) Supplementary single-cell -> pseudo-bulk ----------
+            if expr is None or expr.empty:
+                e3, m3 = _build_from_supplementary(os.path.join(tmp_root, acc))
+                if e3 is not None and not e3.empty:
+                    expr, meta = e3, (m3 if m3 is not None else pd.DataFrame(index=e3.columns))
 
+            # As a last minor fallback: try GSM tables merged (when pivot_samples fails and no series_matrix)
+            if expr is None or expr.empty:
+                try:
+                    mats = []
+                    for gsm_name, gsm in gse.gsms.items():
+                        tab = getattr(gsm, 'table', None)
+                        if tab is None:
+                            continue
+                        # Common column names to try
+                        if 'VALUE' in tab.columns:
+                            vcol = 'VALUE'
+                        elif 'count' in tab.columns:
+                            vcol = 'count'
+                        else:
+                            continue
+                        v = tab[['ID_REF', vcol]].copy().rename(columns={'ID_REF': 'Biomarker', vcol: gsm_name})
+                        mats.append(v)
+                    if mats:
+                        expr = mats[0]
+                        for m_ in mats[1:]:
+                            expr = expr.merge(m_, on='Biomarker', how='outer')
+                        expr = expr.set_index('Biomarker').apply(pd.to_numeric, errors='coerce')
+                        # Minimal meta
+                        meta = pd.DataFrame({"sample": expr.columns, "group": "ALL", "bare_id": expr.columns}).set_index("sample")
+                except Exception:
+                    pass
 
-        # Construct in-memory buffers compatible with run_pipeline
-        expr_buf = io.BytesIO()
-        expr_w = expr.copy()
-        expr_w.insert(0, "Biomarker", expr_w.index)
-        expr_w.to_csv(expr_buf, sep="\t", index=False)
-        expr_buf.seek(0)
+            # If still nothing…
+            if expr is None or expr.empty:
+                failures.append((acc, "Could not construct expression matrix (no series_matrix and no parsable supplementary/count tables)"))
+                continue
 
-        meta_buf = io.BytesIO()
-        meta_reset = meta.reset_index().rename(columns={"index":"sample"})
-        meta_reset.to_csv(meta_buf, sep="\t", index=False)
-        meta_buf.seek(0)
+            # ---------- Normalize indices/case ----------
+            expr.index = expr.index.astype(str).str.strip().str.upper().str.replace(r'\.\d+$', '', regex=True)
+            meta = _coerce_meta(meta)
+            # Align meta to expression columns
+            if not meta.index.name:
+                meta.index.name = "sample"
+            if not meta.index.isin(expr.columns).all():
+                # Re-index gracefully (fill missing rows)
+                meta = meta.reindex(expr.columns).fillna({"group": "ALL", "bare_id": ""})
 
-        ds_label = acc
-        datasets.append({
-            "geo": ds_label,
-            "dataset_id": acc,
-            "counts": expr_buf,
-            "meta": meta_buf,
-            "meta_id_cols": ["sample","Sample","Id","ID","bare_id"],
-            "meta_group_cols": ["group","Group","condition","Condition","phenotype","Phenotype"],
-            "meta_batch_col": None,  # set later if you want to treat 'dataset_id' as batch
-        })
+            # ---------- Build in-memory buffers ----------
+            expr_buf = io.BytesIO()
+            expr_w = expr.copy()
+            expr_w.insert(0, "Biomarker", expr_w.index)
+            expr_w.to_csv(expr_buf, sep="\t", index=False)
+            expr_buf.seek(0)
 
-        # fill summary/eval rows (best-effort)
-        summary_rows.append({
-            "data set id": acc,
-            "n_genes": int(expr.shape[0]),
-            "n_samples": int(expr.shape[1]),
-            "source": "GEO",
-            "library_strategy": ";".join(sorted(set(meta_reset.get("library_strategy", pd.Series()).astype(str)))),
-        })
-        eval_rows.append({
-            "dataset_id": acc,
-            "source": "GEO",
-            "download_ok": True,
-            "constructed_matrix": True,
-        })
+            meta_buf = io.BytesIO()
+            meta_reset = meta.reset_index().rename(columns={"index": "sample"})
+            meta_reset.to_csv(meta_buf, sep="\t", index=False)
+            meta_buf.seek(0)
 
-    # Build dataset_summary df and eval json
+            ds_label = acc
+            datasets.append({
+                "geo": ds_label,
+                "dataset_id": acc,
+                "counts": expr_buf,
+                "meta": meta_buf,
+                "meta_id_cols": ["sample","Sample","Id","ID","bare_id"],
+                "meta_group_cols": ["group","Group","condition","Condition","phenotype","Phenotype"],
+                "meta_batch_col": None,
+            })
+
+            # Summary rows
+            summary_rows.append({
+                "data set id": acc,
+                "n_genes": int(expr.shape[0]),
+                "n_samples": int(expr.shape[1]),
+                "source": "GEO",
+                "library_strategy": ";".join(sorted(set(meta_reset.get("library_strategy", pd.Series()).astype(str)))),
+            })
+            eval_rows.append({
+                "dataset_id": acc,
+                "source": "GEO",
+                "download_ok": True,
+                "constructed_matrix": True,
+            })
+            succeeded += 1
+
+        except Exception as e:
+            failures.append((acc, f"Exception: {type(e).__name__}: {e}"))
+            continue
+
+    if succeeded == 0:
+        # Aggregate a concise error
+        msg = "No GEO series could be parsed.\n" + "\n".join([f"- {a}: {why}" for a, why in failures[:5]])
+        raise RuntimeError(msg)
+
     ds_summary_df = pd.DataFrame(summary_rows) if len(summary_rows) else pd.DataFrame()
+
+    # If some failed, it’s useful to log (without crashing)
+    if failures:
+        warnings.warn("Some accessions were skipped:\n" + "\n".join([f"- {a}: {why}" for a, why in failures[:5]]))
+
     return datasets, ds_summary_df, eval_rows
+
 
 
 # ---------------- Multi-GEO wrapper + meta-analysis ----------------
@@ -1764,6 +1853,7 @@ def run_pipeline_multi(
     if qa_warnings:
         out["qa_mapping_warnings"] = qa_warnings
     return out
+
 
 
 
