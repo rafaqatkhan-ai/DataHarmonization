@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-# harmonizer.py — single-dataset pipeline + Multi-GEO wrapper + meta-analysis + presenter assets
+# harmonizer.py — single-dataset pipeline + Multi-GEO wrapper + meta-analysis + presenter assets + dataset QA I/O
 import os, re, io, json, warnings, zipfile, tempfile
-from typing import Dict, Tuple, List, Iterable, Optional
+from typing import Dict, Tuple, List, Iterable, Optional, Any
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -217,9 +217,7 @@ def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFra
                 if isinstance(obj, (str, os.PathLike))
                 else pd.read_excel(_as_bytesio_seekable(obj), engine="openpyxl"))
 
-    # Route text-like / unknown suffixes through the robust reader
     return _read_text(metadata_obj if is_pathlike else _as_bytesio_seekable(metadata_obj))
-
 
 # ---------------- Batch detection ----------------
 _BATCH_HINTS = [
@@ -396,7 +394,7 @@ def create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, figdir: st
 
     plt.figure(figsize=(12,6))
     grp_series = meta["group"] if "group" in meta.columns else pd.Series("ALL", index=meta.index)
-    groups_seen = list(pd.unique(grp_series.astype(str)))  # <-- FIXED: removed stray parenthesis
+    groups_seen = list(pd.unique(grp_series.astype(str)))
     for grp in groups_seen:
         cols = meta.index[grp_series==grp]
         vals = expr_harmonized[cols].values.ravel() if len(cols) else np.array([])
@@ -659,6 +657,9 @@ def run_pipeline(
     pca_topk_features: int = 5000,
     make_nonlinear: bool = True,
     gsea_gmt: Optional[str] = None,
+    # NEW: Dataset QA artifacts
+    dataset_summary_df: Optional[pd.DataFrame] = None,
+    evaluation_results_json: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, str]:
 
     if metadata_file is None:
@@ -838,13 +839,50 @@ def run_pipeline(
         volcano_and_ma_plots(df, k, os.path.join(OUTDIR, "figs"))
         heatmap_top_de(expr_log2, meta, df, k, os.path.join(OUTDIR, "figs"), topn=50)
 
-    # 11) GSEA (optional)
+    # 11) GSEA (optional)  — placeholder for future use
     gsea_dir = os.path.join(OUTDIR, "gsea"); os.makedirs(gsea_dir, exist_ok=True)
 
     # 12) Save outputs
     expr_harmonized.to_csv(os.path.join(OUTDIR, "expression_harmonized.tsv"), sep="\t")
     pca_df.to_csv(os.path.join(OUTDIR, "pca_scores.tsv"), sep="\t")
 
+    # ---- NEW: Save Dataset QA artifacts (if provided) ----
+    QA_DIR = os.path.join(OUTDIR, "report", "dataset_qa")
+    os.makedirs(QA_DIR, exist_ok=True)
+    qa_digest: Dict[str, Any] = {}
+
+    if dataset_summary_df is not None and isinstance(dataset_summary_df, pd.DataFrame):
+        df = dataset_summary_df.copy()
+        # ensure canonical columns exist
+        canonical_cols = [
+            "user query","tissue type requested","experiment type requested","data set id",
+            "no of samples","no of samples validating the condition","sample tissue type",
+            "sample characteristics","library strategy","extractedprotocol"
+        ]
+        for c in canonical_cols:
+            if c not in df.columns: df[c] = np.nan
+        df.to_csv(os.path.join(QA_DIR, "dataset_summary_normalized.csv"), index=False)
+        qa_digest["summary_dataset_ids"] = sorted({str(x) for x in df["data set id"].dropna().astype(str).tolist()})
+
+    if evaluation_results_json is not None:
+        try:
+            with open(os.path.join(QA_DIR, "evaluation_results.json"), "w") as fh:
+                json.dump(evaluation_results_json, fh, indent=2)
+        except Exception:
+            pass
+        # small digest for report.json
+        dig = []
+        for item in (evaluation_results_json if isinstance(evaluation_results_json, list) else [evaluation_results_json]):
+            pm = (item.get("primary_metrics") or {})
+            dig.append({
+                "dataset_id": item.get("dataset_id"),
+                "suitability_score": pm.get("suitability_score"),
+                "tissue_match": pm.get("tissue_match"),
+                "sample_coverage": pm.get("sample_coverage"),
+            })
+        qa_digest["evaluation_digest"] = dig
+
+    # Build report object
     rep = {
         "qc": {"zero_fraction": float(diags.get("zero_fraction", np.nan)),
                "value_range_approx": float(diags.get("value_range_approx", np.nan)),
@@ -855,7 +893,10 @@ def run_pipeline(
         "notes": {}
     }
     if pca_skipped_reason: rep["notes"]["pca_skipped_reason"] = pca_skipped_reason
-    with open(os.path.join(OUTDIR, "report.json"), "w") as f: json.dump(rep, f, indent=2)
+    if qa_digest: rep["dataset_qa"] = qa_digest
+
+    with open(os.path.join(OUTDIR, "report.json"), "w") as f:
+        json.dump(rep, f, indent=2)
 
     zip_path = os.path.join(OUTDIR, "results_bundle.zip")
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -962,7 +1003,7 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
         "📊 STATISTICAL RESULTS:",
         f"   • Significant genes (FDR < {fdr_thresh}): {sig:,}",
         f"   • Consistently upregulated genes: {up_consistent:,}",
-        f"   • Meta-analysis method: Signed Stouffer Z (gene-level)",
+        "   • Meta-analysis method: Signed Stouffer Z (gene-level)",
         "",
         "🧬 TOP BIOMARKER CANDIDATES:",
     ]
@@ -1036,6 +1077,9 @@ def run_pipeline_multi(
     out_root: str = "out/multi_geo",
     pca_topk_features: int = 5000,
     make_nonlinear: bool = True,
+    # NEW: allow QA artifacts to be attached to the combined run
+    dataset_summary_df: Optional[pd.DataFrame] = None,
+    evaluation_results_json: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict:
     os.makedirs(out_root, exist_ok=True)
     runs, exprs, metas = {}, {}, {}
@@ -1048,13 +1092,14 @@ def run_pipeline_multi(
             single_expression_file=d["counts"],
             single_expression_name_hint=d.get("counts_name"),
             metadata_file=d["meta"],
-            metadata_name_hint=d.get("meta_name"),   # let the reader sniff
+            metadata_name_hint=d.get("meta_name"),   # robust reader
             metadata_id_cols=d.get("meta_id_cols") or ["Id","ID","id","sample","Sample","bare_id"],
             metadata_group_cols=d.get("meta_group_cols") or ["group","Group","condition","Condition","phenotype","Phenotype"],
             metadata_batch_col=d.get("meta_batch_col"),
             out_root=outdir,
             pca_topk_features=pca_topk_features,
             make_nonlinear=make_nonlinear,
+            # We usually do NOT attach global QA to per-dataset runs
         )
         runs[name] = res
         exprs[name] = pd.read_csv(os.path.join(res["outdir"], "expression_combined.tsv"), sep="\t", index_col=0)
@@ -1106,6 +1151,9 @@ def run_pipeline_multi(
                 out_root=combined_out,
                 pca_topk_features=pca_topk_features,
                 make_nonlinear=make_nonlinear,
+                # NEW: attach global QA files to the combined run outputs
+                dataset_summary_df=dataset_summary_df,
+                evaluation_results_json=evaluation_results_json,
             )
 
     # run meta-analysis (uses per-dataset DE tables)
@@ -1120,6 +1168,3 @@ def run_pipeline_multi(
         "summary_png_path": meta.get("summary_png_path"),
     }
     return out
-
-
-
