@@ -1,3 +1,4 @@
+GEOparse
 pandas
 numpy
 scikit-learn
