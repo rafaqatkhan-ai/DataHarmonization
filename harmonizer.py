@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# harmonizer.py — single-dataset pipeline + Multi-GEO wrapper + meta-analysis + presenter assets + dataset QA I/O
+# harmonizer.py — single-dataset pipeline + Multi-GEO wrapper + meta-analysis + presenter assets + GEO fetch
+
 import os, re, io, json, warnings, zipfile, tempfile
 from typing import Dict, Tuple, List, Iterable, Optional, Any
 import numpy as np
@@ -96,6 +97,10 @@ def _as_bytesio_seekable(x):
     bio = _as_bytesio(x)
     if bio is not None: bio.seek(0)
     return bio
+
+def _norm_id(x: str | None) -> str:
+    if x is None: return ""
+    return re.sub(r"\s+", "", str(x).strip().lower())
 
 # ---------------- IO ----------------
 def read_expression_any(bytes_or_path, name_hint: Optional[str] = None, group_name: Optional[str] = None,
@@ -217,6 +222,7 @@ def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFra
                 if isinstance(obj, (str, os.PathLike))
                 else pd.read_excel(_as_bytesio_seekable(obj), engine="openpyxl"))
 
+    # Route text-like / unknown suffixes through the robust reader
     return _read_text(metadata_obj if is_pathlike else _as_bytesio_seekable(metadata_obj))
 
 # ---------------- Batch detection ----------------
@@ -527,7 +533,6 @@ def nonlinear_embedding_plots(Xc, meta, figdir, harmonization_mode, make=True):
         except Exception: pass
     if Emb is None and _HAVE_TSNE:
         try:
-            from sklearn.manifold import TSNE
             perplexity = max(5, min(30, (Xp_embed.shape[0]-1)//3))
             tsne = TSNE(n_components=2, init="pca", learning_rate="auto",
                         perplexity=perplexity, n_iter=1000, random_state=42)
@@ -657,9 +662,6 @@ def run_pipeline(
     pca_topk_features: int = 5000,
     make_nonlinear: bool = True,
     gsea_gmt: Optional[str] = None,
-    # NEW: Dataset QA artifacts
-    dataset_summary_df: Optional[pd.DataFrame] = None,
-    evaluation_results_json: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, str]:
 
     if metadata_file is None:
@@ -839,50 +841,13 @@ def run_pipeline(
         volcano_and_ma_plots(df, k, os.path.join(OUTDIR, "figs"))
         heatmap_top_de(expr_log2, meta, df, k, os.path.join(OUTDIR, "figs"), topn=50)
 
-    # 11) GSEA (optional)  — placeholder for future use
+    # 11) GSEA (optional) — reserved hook, if you wire gp.prerank etc.
     gsea_dir = os.path.join(OUTDIR, "gsea"); os.makedirs(gsea_dir, exist_ok=True)
 
     # 12) Save outputs
     expr_harmonized.to_csv(os.path.join(OUTDIR, "expression_harmonized.tsv"), sep="\t")
     pca_df.to_csv(os.path.join(OUTDIR, "pca_scores.tsv"), sep="\t")
 
-    # ---- NEW: Save Dataset QA artifacts (if provided) ----
-    QA_DIR = os.path.join(OUTDIR, "report", "dataset_qa")
-    os.makedirs(QA_DIR, exist_ok=True)
-    qa_digest: Dict[str, Any] = {}
-
-    if dataset_summary_df is not None and isinstance(dataset_summary_df, pd.DataFrame):
-        df = dataset_summary_df.copy()
-        # ensure canonical columns exist
-        canonical_cols = [
-            "user query","tissue type requested","experiment type requested","data set id",
-            "no of samples","no of samples validating the condition","sample tissue type",
-            "sample characteristics","library strategy","extractedprotocol"
-        ]
-        for c in canonical_cols:
-            if c not in df.columns: df[c] = np.nan
-        df.to_csv(os.path.join(QA_DIR, "dataset_summary_normalized.csv"), index=False)
-        qa_digest["summary_dataset_ids"] = sorted({str(x) for x in df["data set id"].dropna().astype(str).tolist()})
-
-    if evaluation_results_json is not None:
-        try:
-            with open(os.path.join(QA_DIR, "evaluation_results.json"), "w") as fh:
-                json.dump(evaluation_results_json, fh, indent=2)
-        except Exception:
-            pass
-        # small digest for report.json
-        dig = []
-        for item in (evaluation_results_json if isinstance(evaluation_results_json, list) else [evaluation_results_json]):
-            pm = (item.get("primary_metrics") or {})
-            dig.append({
-                "dataset_id": item.get("dataset_id"),
-                "suitability_score": pm.get("suitability_score"),
-                "tissue_match": pm.get("tissue_match"),
-                "sample_coverage": pm.get("sample_coverage"),
-            })
-        qa_digest["evaluation_digest"] = dig
-
-    # Build report object
     rep = {
         "qc": {"zero_fraction": float(diags.get("zero_fraction", np.nan)),
                "value_range_approx": float(diags.get("value_range_approx", np.nan)),
@@ -893,10 +858,7 @@ def run_pipeline(
         "notes": {}
     }
     if pca_skipped_reason: rep["notes"]["pca_skipped_reason"] = pca_skipped_reason
-    if qa_digest: rep["dataset_qa"] = qa_digest
-
-    with open(os.path.join(OUTDIR, "report.json"), "w") as f:
-        json.dump(rep, f, indent=2)
+    with open(os.path.join(OUTDIR, "report.json"), "w") as f: json.dump(rep, f, indent=2)
 
     zip_path = os.path.join(OUTDIR, "results_bundle.zip")
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -908,6 +870,149 @@ def run_pipeline(
 
     return {"outdir": OUTDIR, "figdir": os.path.join(OUTDIR, "figs"),
             "report_json": os.path.join(OUTDIR, "report.json"), "zip": zip_path}
+
+# ---------------- GEO fetch helpers ----------------
+
+def _try_import_geoparse():
+    try:
+        import GEOparse
+        return GEOparse
+    except Exception:
+        return None
+
+_DEF_META_COLS = [
+    "user query","tissue type requested","experiment type requested","data set id",
+    "no of samples","no of sample validting the condition","sample tissue type",
+    "sample characteristics","library strategy","extractedprotocol"
+]
+_DEF_META_RENAMES = {
+    "user query": "user_query",
+    "tissue type requested": "tissue_type_requested",
+    "experiment type requested": "experiment_type_requested",
+    "data set id": "data_set_id",
+    "no of samples": "n_samples",
+    "no of sample validting the condition": "n_samples_validating_condition",
+    "sample tissue type": "sample_tissue_type",
+    "sample characteristics": "sample_characteristics",
+    "library strategy": "library_strategy",
+    "extractedprotocol": "extracted_protocol",
+}
+
+def _series_to_expression_and_meta(gse) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Pivot series matrix to expression (rows=probes/genes, cols=samples) and sample metadata."""
+    expr, meta = None, None
+    # try pivot
+    try:
+        expr = gse.pivot_samples('VALUE')
+    except Exception:
+        pass
+    # sample metadata (flatten GSM metadata to a single row)
+    rows = []
+    for gsm_name, gsm in gse.gsms.items():
+        row = {k.lower(): v for k,v in getattr(gsm, 'metadata', {}).items()}
+        flat = {k: (v[0] if isinstance(v, list) and v else v) for k,v in row.items()}
+        flat["sample"] = gsm_name
+        rows.append(flat)
+    meta = pd.DataFrame(rows).set_index("sample") if rows else pd.DataFrame(index=list(gse.gsms.keys()))
+    meta.columns = [str(c).lower().strip() for c in meta.columns]
+
+    if expr is None:
+        mats = []
+        for gsm_name, gsm in gse.gsms.items():
+            tab = getattr(gsm, 'table', None)
+            if tab is None or 'VALUE' not in tab.columns: continue
+            v = tab[['ID_REF','VALUE']].copy().rename(columns={'ID_REF':'Biomarker', 'VALUE':gsm_name})
+            mats.append(v)
+        if mats:
+            expr = mats[0]
+            for m in mats[1:]:
+                expr = expr.merge(m, on='Biomarker', how='outer')
+            expr = expr.set_index('Biomarker')
+
+    if expr is None or expr.empty:
+        raise RuntimeError("Could not construct expression matrix from GEO series.")
+    expr = expr.apply(pd.to_numeric, errors='coerce')
+    return expr, meta
+
+def fetch_geo_as_datasets(accessions: List[str]) -> Tuple[List[Dict[str, Any]], pd.DataFrame, List[Dict[str, Any]]]:
+    """
+    Download GEO GSE accessions and convert to datasets[] usable by run_pipeline_multi.
+    Returns (datasets, dataset_summary_df, evaluation_results_json).
+    """
+    GEOparse = _try_import_geoparse()
+    if GEOparse is None:
+        raise RuntimeError("GEOparse is required for direct GEO fetching. Please pip install GEOparse.")
+
+    datasets: List[Dict[str, Any]] = []
+    summary_rows: List[Dict[str, Any]] = []
+    eval_rows: List[Dict[str, Any]] = []
+
+    tmp_root = tempfile.mkdtemp(prefix="geo_")
+
+    for acc in accessions:
+        gse = GEOparse.get_GEO(geo=acc, destdir=tmp_root, how='quick')
+        expr, meta = _series_to_expression_and_meta(gse)
+
+        # heuristics for group assignment
+        meta = meta.copy()
+        meta.index.name = 'sample'
+        meta['group'] = 'ALL'
+        for col in meta.columns:
+            if any(x in col for x in ['disease','status','phenotype','group']):
+                cand = meta[col].astype(str).str.lower()
+                meta.loc[cand.str.contains('control|healthy|normal', na=False), 'group'] = 'Control'
+                meta.loc[cand.str.contains('case|disease|patient|tumou|cancer|lesion', na=False), 'group'] = 'Disease'
+        meta['bare_id'] = meta.index
+
+        # write expression + meta to in-memory TSVs
+        expr_buf = io.BytesIO()
+        expr_to_write = expr.copy()
+        expr_to_write.insert(0, 'Biomarker', expr_to_write.index)
+        expr_to_write.to_csv(expr_buf, sep='\t', index=False); expr_buf.seek(0)
+
+        meta_buf = io.BytesIO()
+        meta_reset = meta.reset_index()
+        meta_reset.to_csv(meta_buf, sep='\t', index=False); meta_buf.seek(0)
+
+        datasets.append({
+            'geo': acc,
+            'dataset_id': acc,
+            'counts': expr_buf,
+            'counts_name': f'{acc}_expr.tsv',
+            'meta': meta_buf,
+            'meta_name': f'{acc}_meta.tsv',
+            'meta_id_cols': ['sample','Sample','Id','ID','bare_id'],
+            'meta_group_cols': ['group','Group','phenotype','Phenotype','disease status','status'],
+            'meta_batch_col': None,
+        })
+
+        # dataset_summary row (best-effort)
+        summary_rows.append({
+            'user query': '',
+            'tissue type requested': '',
+            'experiment type requested': getattr(gse, 'type', [''])[0] if getattr(gse, 'type', None) else '',
+            'data set id': acc,
+            'no of samples': len(gse.gsms),
+            'no of sample validting the condition': int((meta['group'] != 'ALL').sum()),
+            'sample tissue type': '',
+            'sample characteristics': '; '.join(sorted([c for c in meta.columns if str(c).startswith('characteristics')])),
+            'library strategy': '',
+            'extractedprotocol': '',
+        })
+
+        # placeholder evaluation row (caller may override with real evaluation)
+        eval_rows.append({
+            'dataset_id': acc,
+            'status': 'fetched',
+            'notes': 'Auto-generated by GEO fetch; replace with real evaluation if available.'
+        })
+
+    ds_df = pd.DataFrame(summary_rows)
+    low_map = {c: c.lower() for c in ds_df.columns}
+    ds_df.rename(columns=low_map, inplace=True)
+    for c in _DEF_META_COLS:
+        if c not in ds_df.columns: ds_df[c] = ''
+    return datasets, ds_df[_DEF_META_COLS].rename(columns=_DEF_META_RENAMES), eval_rows
 
 # ---------------- Multi-GEO wrapper + meta-analysis ----------------
 def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_thresh: float = 0.10) -> Dict:
@@ -1003,7 +1108,7 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
         "📊 STATISTICAL RESULTS:",
         f"   • Significant genes (FDR < {fdr_thresh}): {sig:,}",
         f"   • Consistently upregulated genes: {up_consistent:,}",
-        "   • Meta-analysis method: Signed Stouffer Z (gene-level)",
+        f"   • Meta-analysis method: Signed Stouffer Z (gene-level)",
         "",
         "🧬 TOP BIOMARKER CANDIDATES:",
     ]
@@ -1077,35 +1182,81 @@ def run_pipeline_multi(
     out_root: str = "out/multi_geo",
     pca_topk_features: int = 5000,
     make_nonlinear: bool = True,
-    # NEW: allow QA artifacts to be attached to the combined run
     dataset_summary_df: Optional[pd.DataFrame] = None,
     evaluation_results_json: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict:
     os.makedirs(out_root, exist_ok=True)
     runs, exprs, metas = {}, {}, {}
 
+    # Pre-normalize lookups for fast per-dataset slicing
+    ds_summary_df_norm = None
+    if isinstance(dataset_summary_df, pd.DataFrame) and not dataset_summary_df.empty:
+        ds_summary_df_norm = dataset_summary_df.copy()
+        cols_lower = {c.lower(): c for c in ds_summary_df_norm.columns}
+        keycol = None
+        for k in ["data set id","dataset id","geo accession","gse","series id","data_set_id"]:
+            if k in cols_lower:
+                keycol = cols_lower[k]; break
+        if keycol is None:
+            ds_summary_df_norm["__key__"] = ""
+            keycol = "__key__"
+        ds_summary_df_norm["_key"] = ds_summary_df_norm[keycol].map(_norm_id)
+
+    eval_list = None
+    if evaluation_results_json is not None:
+        eval_list = evaluation_results_json if isinstance(evaluation_results_json, list) else [evaluation_results_json]
+
+    qa_warnings = []
+
     # per-dataset runs
     for d in datasets:
         name = d.get("geo") or f"DS{len(runs)+1}"
+        ds_id = d.get("dataset_id") or name
+        ds_id_key = _norm_id(ds_id)
+
+        # slice QA artifacts
+        ds_subset_df = None
+        if ds_summary_df_norm is not None and "_key" in ds_summary_df_norm.columns:
+            tmp = ds_summary_df_norm[ds_summary_df_norm["_key"] == ds_id_key]
+            ds_subset_df = tmp.drop(columns=["_key"], errors="ignore")
+            if ds_subset_df is not None and ds_subset_df.empty:
+                qa_warnings.append(f"No dataset_summary rows found for dataset_id '{ds_id}'")
+
+        eval_subset = None
+        if eval_list is not None:
+            eval_subset = [x for x in eval_list if _norm_id(x.get("dataset_id")) == ds_id_key]
+            if len(eval_subset) == 0:
+                qa_warnings.append(f"No evaluation_results entries found for dataset_id '{ds_id}'")
+
         outdir = os.path.join(out_root, name)
         res = run_pipeline(
             single_expression_file=d["counts"],
             single_expression_name_hint=d.get("counts_name"),
             metadata_file=d["meta"],
-            metadata_name_hint=d.get("meta_name"),   # robust reader
+            metadata_name_hint=d.get("meta_name"),
             metadata_id_cols=d.get("meta_id_cols") or ["Id","ID","id","sample","Sample","bare_id"],
             metadata_group_cols=d.get("meta_group_cols") or ["group","Group","condition","Condition","phenotype","Phenotype"],
             metadata_batch_col=d.get("meta_batch_col"),
             out_root=outdir,
             pca_topk_features=pca_topk_features,
             make_nonlinear=make_nonlinear,
-            # We usually do NOT attach global QA to per-dataset runs
         )
+
+        # Attach per-dataset QA artifacts under report/dataset_qa/
+        qa_dir = os.path.join(res["outdir"], "report", "dataset_qa")
+        os.makedirs(qa_dir, exist_ok=True)
+        if isinstance(ds_subset_df, pd.DataFrame) and not ds_subset_df.empty:
+            ds_subset_df.to_csv(os.path.join(qa_dir, "dataset_summary_normalized.csv"), index=False)
+        if isinstance(eval_subset, list) and len(eval_subset):
+            with open(os.path.join(qa_dir, "evaluation_results.json"), "w") as fh:
+                json.dump(eval_subset, fh, indent=2)
+
         runs[name] = res
         exprs[name] = pd.read_csv(os.path.join(res["outdir"], "expression_combined.tsv"), sep="\t", index_col=0)
         metas[name] = pd.read_csv(os.path.join(res["outdir"], "metadata.tsv"), sep="\t", index_col=0)
 
-    decision = {"attempted": attempt_combine, "combined": False, "overlap_genes": 0}
+    # combine decision
+    decision = {"attempted": True if attempt_combine else False, "combined": False, "overlap_genes": 0}
     combined = None
 
     if attempt_combine and len(exprs) >= 2:
@@ -1124,8 +1275,7 @@ def run_pipeline_multi(
             for name, X in exprs.items():
                 Xi = X.loc[common]
                 expr_joined.append(Xi)
-                m = metas[name].copy()
-                m["dataset"] = name
+                m = metas[name].copy(); m["dataset"] = name
                 meta_joined.append(m)
             expr_all = pd.concat(expr_joined, axis=1, join="outer")
             meta_all = pd.concat(meta_joined, axis=0)
@@ -1151,12 +1301,18 @@ def run_pipeline_multi(
                 out_root=combined_out,
                 pca_topk_features=pca_topk_features,
                 make_nonlinear=make_nonlinear,
-                # NEW: attach global QA files to the combined run outputs
-                dataset_summary_df=dataset_summary_df,
-                evaluation_results_json=evaluation_results_json,
             )
 
-    # run meta-analysis (uses per-dataset DE tables)
+            # attach global QA to combined
+            qa_dir_c = os.path.join(combined["outdir"], "report", "dataset_qa")
+            os.makedirs(qa_dir_c, exist_ok=True)
+            if isinstance(dataset_summary_df, pd.DataFrame) and not dataset_summary_df.empty:
+                dataset_summary_df.to_csv(os.path.join(qa_dir_c, "dataset_summary_normalized.csv"), index=False)
+            if evaluation_results_json is not None:
+                with open(os.path.join(qa_dir_c, "evaluation_results.json"), "w") as fh:
+                    json.dump(evaluation_results_json, fh, indent=2)
+
+    # run meta-analysis
     meta = meta_analyze_disease_vs_control(runs, out_root=os.path.join(out_root, "meta_summary"))
 
     out = {
@@ -1167,4 +1323,6 @@ def run_pipeline_multi(
         "summary_txt_path": meta.get("summary_txt_path"),
         "summary_png_path": meta.get("summary_png_path"),
     }
+    if qa_warnings:
+        out["qa_mapping_warnings"] = qa_warnings
     return out
