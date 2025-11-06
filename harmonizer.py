@@ -193,63 +193,130 @@ def _collect_supplementary_paths(gse_root_dir: str):
     return sup
 def _read_10x_minimal(path: str):
     """
-    Minimal 10x reader without scanpy/anndata.
-    Supports directories with matrix.mtx(.gz), features/genes(.tsv[.gz]), barcodes(.tsv[.gz]).
-    Returns a (genes x cells) dense DataFrame.
+    Minimal 10x reader WITHOUT scanpy/anndata/scipy.
+    Works with a directory (or archive) containing:
+      matrix.mtx(.gz), features.tsv(.gz) or genes.tsv(.gz), barcodes.tsv(.gz)
+    Returns a dense DataFrame: rows=genes, cols=cells.
     """
-    import gzip
-    from scipy.io import mmread
-
-    def _open(p):
-        return gzip.open(p, 'rt') if p.endswith(".gz") else open(p, 'r')
-
-    # Allow passing an archive; if so, extract to a temp dir
-    if os.path.isfile(path) and (tarfile.is_tarfile(path) or zipfile.is_zipfile(path)):
-        tmpd = tempfile.mkdtemp()
-        try:
-            if tarfile.is_tarfile(path):
-                with tarfile.open(path) as tf: tf.extractall(tmpd)
-            else:
-                with zipfile.ZipFile(path) as zf: zf.extractall(tmpd)
-            path = tmpd
-        except Exception:
-            shutil.rmtree(tmpd, ignore_errors=True)
-            raise
-
-    # Find matrix dir
-    cand = None
-    for root, _, files in os.walk(path):
-        if "matrix.mtx" in files or "matrix.mtx.gz" in files:
-            cand = root; break
-    if cand is None:
-        raise RuntimeError("matrix.mtx not found")
-
-    # Resolve filenames
-    mtx = os.path.join(cand, "matrix.mtx.gz") if os.path.exists(os.path.join(cand,"matrix.mtx.gz")) else os.path.join(cand,"matrix.mtx")
-    features = None
-    for fn in ["features.tsv.gz","features.tsv","genes.tsv.gz","genes.tsv"]:
-        p = os.path.join(cand, fn)
-        if os.path.exists(p):
-            features = p; break
-    barcodes = None
-    for fn in ["barcodes.tsv.gz","barcodes.tsv"]:
-        p = os.path.join(cand, fn)
-        if os.path.exists(p):
-            barcodes = p; break
-    if features is None or barcodes is None:
-        raise RuntimeError("features.tsv / barcodes.tsv not found")
-
-    # Load
-    M = mmread(mtx).tocsr()
-    with _open(features) as fh:
-        feats = [line.strip().split("\t")[1] if "\t" in line else line.strip() for line in fh]
-    with _open(barcodes) as fh:
-        cells = [line.strip() for line in fh]
-
+    import gzip, io, shutil, tempfile, tarfile, zipfile
     import numpy as np
     import pandas as pd
-    df = pd.DataFrame.sparse.from_spmatrix(M, index=feats, columns=cells).astype("float64")
-    return df
+
+    def _open_text(p):
+        return gzip.open(p, 'rt') if p.endswith('.gz') else open(p, 'r')
+
+    # If an archive is passed, extract to temp
+    cleanup_dir = None
+    if os.path.isfile(path) and (tarfile.is_tarfile(path) or zipfile.is_zipfile(path)):
+        tmpd = tempfile.mkdtemp(prefix="tenx_")
+        cleanup_dir = tmpd
+        if tarfile.is_tarfile(path):
+            with tarfile.open(path) as tf: tf.extractall(tmpd)
+        else:
+            with zipfile.ZipFile(path) as zf: zf.extractall(tmpd)
+        path = tmpd
+
+    try:
+        # Find the folder that contains matrix.mtx(.gz)
+        mdir = None
+        for root, _, files in os.walk(path):
+            if ('matrix.mtx' in files) or ('matrix.mtx.gz' in files):
+                mdir = root; break
+        if mdir is None:
+            raise RuntimeError("matrix.mtx not found")
+
+        # Resolve filenames
+        mtx = os.path.join(mdir, 'matrix.mtx.gz') if os.path.exists(os.path.join(mdir,'matrix.mtx.gz')) else os.path.join(mdir,'matrix.mtx')
+        feats = None
+        for fn in ('features.tsv.gz','features.tsv','genes.tsv.gz','genes.tsv'):
+            p = os.path.join(mdir, fn)
+            if os.path.exists(p): feats = p; break
+        bars = None
+        for fn in ('barcodes.tsv.gz','barcodes.tsv'):
+            p = os.path.join(mdir, fn)
+            if os.path.exists(p): bars = p; break
+        if feats is None or bars is None:
+            raise RuntimeError("features.tsv / barcodes.tsv not found")
+
+        # ---- Tiny .mtx reader (COO) without SciPy
+        def _read_mtx_coo(path_mtx):
+            # Support optional gzip
+            fh = gzip.open(path_mtx, 'rt') if path_mtx.endswith('.gz') else open(path_mtx, 'r')
+            with fh:
+                # Skip comments
+                header = fh.readline().strip()
+                while header.startswith('%'):
+                    header = fh.readline().strip()
+                # Now header has dimension line
+                parts = header.split()
+                if len(parts) != 3:
+                    # sometimes the first non-comment line can be blank
+                    # read until we hit 3 numbers
+                    while True:
+                        header = fh.readline().strip()
+                        if not header:
+                            continue
+                        parts = header.split()
+                        if len(parts) == 3: break
+                nrows, ncols, nnz = map(int, parts)
+                rows = np.empty(nnz, dtype=np.int64)
+                cols = np.empty(nnz, dtype=np.int64)
+                data = np.empty(nnz, dtype=np.float64)
+                i = 0
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    r, c, v = line.split()[:3]
+                    rows[i] = int(r) - 1  # 1-based -> 0-based
+                    cols[i] = int(c) - 1
+                    try:
+                        data[i] = float(v)
+                    except Exception:
+                        data[i] = 0.0
+                    i += 1
+                # build dense (we'll sum duplicates)
+                mat = {}
+                for r, c, v in zip(rows, cols, data):
+                    mat[(r,c)] = mat.get((r,c), 0.0) + v
+                # to dense ndarray
+                arr = np.zeros((nrows, ncols), dtype=np.float64)
+                for (r,c), v in mat.items():
+                    arr[r, c] = v
+                return arr
+
+        X = _read_mtx_coo(mtx)
+
+        # Load features and barcodes
+        with _open_text(feats) as fh:
+            feat_rows = [line.rstrip('\n').split('\t') for line in fh]
+        with _open_text(bars) as fh:
+            cell_ids = [line.strip() for line in fh if line.strip()]
+
+        # Feature name selection: prefer second column; else first
+        gene_names = []
+        for r in feat_rows:
+            if len(r) >= 2 and r[1]:
+                gene_names.append(r[1])
+            elif len(r) >= 1:
+                gene_names.append(r[0])
+            else:
+                gene_names.append("NA")
+        # Normalize + de-duplicate empties
+        gene_names = [str(g).strip().upper().split('.')[0] if g else "NA" for g in gene_names]
+        # Ensure lengths match
+        if len(gene_names) != X.shape[0]:
+            # fallback: truncate/pad
+            gene_names = (gene_names + ["NA"] * X.shape[0])[:X.shape[0]]
+        if len(cell_ids) != X.shape[1]:
+            cell_ids = (cell_ids + [f"C{i+1}"] * X.shape[1])[:X.shape[1]]
+
+        df = pd.DataFrame(X, index=gene_names, columns=cell_ids)
+        # collapse duplicate gene names
+        df = df.groupby(level=0, sort=False).sum()
+        return df
+    finally:
+        if cleanup_dir:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
 
 def _build_from_supplementary(gse_root_dir: str):
     """
@@ -262,20 +329,15 @@ def _build_from_supplementary(gse_root_dir: str):
         built = False
         for p in paths:
             try:
-                if _HAVE_SCANPY:
-                    adata = _read_10x_like_matrix(p if os.path.isfile(p) else os.path.dirname(p))
-                    pb = _pseudo_bulk_by_gene(adata)
-                else:
-                    # minimal reader path
-                    root = p if os.path.isdir(p) else (os.path.dirname(p))
-                    X = _read_10x_minimal(root)
-                    # collapse to pseudo-bulk (sum across cells)
-                    pb = X.groupby(X.index).sum()
-                    if pb.shape[1] > 1:
-                        pb = pb.sum(axis=1).to_frame(gsm)
-                    else:
-                        pb.columns = [gsm]
-                    pb.index = pb.index.astype(str).str.upper().str.replace(r'\.\d+$','',regex=True)
+               if _HAVE_SCANPY:
+                adata = _read_10x_like_matrix(p if os.path.isfile(p) else os.path.dirname(p))
+                pb = _pseudo_bulk_by_gene(adata)
+            else:
+                root = p if os.path.isdir(p) else os.path.dirname(p)
+                X = _read_10x_minimal(root)
+                # pseudo-bulk by summing cells
+                pb = X.sum(axis=1).to_frame(gsm)
+                pb.index = pb.index.astype(str).str.upper().str.replace(r'\.\d+$','',regex=True)
                 matrices.append(pb)
                 built = True
                 break
@@ -1328,9 +1390,12 @@ def fetch_geo_as_datasets(accessions: list[str]) -> tuple[list[dict], pd.DataFra
             expr, meta = _build_from_supplementary(os.path.join(tmp_root, acc))
 
         if expr is None or meta is None or expr.empty:
-            raise RuntimeError(f"Could not construct expression matrix from GEO series {acc}. "
-                               f"Tip: This often means it's single-cell without series_matrix; "
-                               f"install scanpy/anndata or enable the minimal 10x reader.")
+            raise RuntimeError(
+            f"Could not construct expression matrix from GEO series {acc}. "
+            f"(No series_matrix and no parsable supplementary counts; "
+            f"try installing scanpy/anndata OR rely on the minimal 10x reader added.)"
+        )
+
 
         # Construct in-memory buffers compatible with run_pipeline
         expr_buf = io.BytesIO()
@@ -1687,6 +1752,7 @@ def run_pipeline_multi(
     if qa_warnings:
         out["qa_mapping_warnings"] = qa_warnings
     return out
+
 
 
 
