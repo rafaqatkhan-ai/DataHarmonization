@@ -52,6 +52,34 @@ _GSE_RE = re.compile(r"^GSE\d+$", re.IGNORECASE)
 # ==== GEO matrix builders & fallbacks ====
 import gzip, glob, tarfile, zipfile
 from io import BytesIO
+def _ensure_sample_supplementaries(gse, destdir: str) -> list[str]:
+    """
+    Download per-GSM supplementary files (e.g., .tar.gz with 10x matrices) into destdir.
+    Returns a list of local file paths downloaded/found.
+    """
+    import urllib.request
+    os.makedirs(destdir, exist_ok=True)
+    found = []
+
+    for gsm_name, gsm in getattr(gse, "gsms", {}).items():
+        supp = gsm.metadata.get("supplementary_file", [])
+        # Some GEOs store as single string; normalize to list
+        if isinstance(supp, str):
+            supp = [supp]
+        for url in supp:
+            if not isinstance(url, str) or not url:
+                continue
+            # Only fetch matrix-like archives/files
+            if not url.lower().endswith((".tar.gz", ".tgz", ".zip", ".mtx", ".mtx.gz", ".h5", ".hdf5", ".loom")):
+                continue
+            local_name = os.path.join(destdir, os.path.basename(url))
+            if not os.path.exists(local_name):
+                try:
+                    urllib.request.urlretrieve(url, local_name)
+                except Exception:
+                    continue
+            found.append(local_name)
+    return found
 
 def _series_to_expression_and_meta(gse):
     """
@@ -1405,6 +1433,9 @@ def fetch_geo_as_datasets(accessions: list[str]) -> tuple[list[dict], pd.DataFra
         try:
             # Be generous: how='full' downloads all, annotate_gpl often helps pivot
             gse = GEOparse.get_GEO(geo=acc, destdir=tmp_root, how='full', annotate_gpl=True)
+            # NEW: proactively fetch .tar.gz / MTX / H5 / loom if GEOparse didn’t lay them down
+            supp_dir = os.path.join(tmp_root, acc, "supp_downloads")
+            _ensure_sample_supplementaries(gse, supp_dir)
 
             # ---------- 1) Try in-memory pivot (bulk matrices) ----------
             expr, meta = None, None
@@ -1438,6 +1469,11 @@ def fetch_geo_as_datasets(accessions: list[str]) -> tuple[list[dict], pd.DataFra
             # ---------- 3) Supplementary single-cell -> pseudo-bulk ----------
             if expr is None or expr.empty:
                 e3, m3 = _build_from_supplementary(os.path.join(tmp_root, acc))
+                # Also try the explicit downloads folder:
+                if (e3 is None or e3.empty) and os.path.isdir(supp_dir):
+                    e3b, m3b = _build_from_supplementary(supp_dir)
+                if e3b is not None and not e3b.empty:
+                    e3, m3 = e3b, m3b
                 if e3 is not None and not e3.empty:
                     expr, meta = e3, (m3 if m3 is not None else pd.DataFrame(index=e3.columns))
 
@@ -1853,6 +1889,7 @@ def run_pipeline_multi(
     if qa_warnings:
         out["qa_mapping_warnings"] = qa_warnings
     return out
+
 
 
 
