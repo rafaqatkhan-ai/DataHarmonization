@@ -720,20 +720,49 @@ def drop_zero_variance(X):
     return X.loc[var > VAR_EPS]
 
 def safe_matrix_for_pca(matrix, topk: int = 5000):
+    """
+    Build a PCA-ready samples×features matrix with robust fallbacks.
+    Ensures we always return at least a couple hundred features when possible.
+    """
     X = (matrix.copy().apply(pd.to_numeric, errors="coerce").astype(float)
          .replace([np.inf, -np.inf], np.nan).fillna(0.0))
+
+    # Start with variance
     ddof = 0 if X.shape[1] < 2 else 1
-    var = X.var(axis=1, ddof=ddof).fillna(0.0)
-    nz = var > VAR_EPS
+    var = X.var(axis=1, ddof=ddof).astype(float).fillna(0.0)
+
+    # Primary selector: strictly positive variance
+    nz = var > 0
+
+    # Fallback 1: MAD (more robust when values are very close)
     if not nz.any():
         med = X.median(axis=1)
-        mad = (X.sub(med, axis=0).abs()).median(axis=1)
+        mad = (X.sub(med, axis=0).abs()).median(axis=1).astype(float).fillna(0.0)
         nz = mad > 0
+
+    # Fallback 2: if still none, keep the top rows by (very) small variance/MAD
     if not nz.any():
-        raise RuntimeError("No non-zero-variance features for PCA.")
-    if topk and nz.sum() > topk: X = X.loc[var.loc[nz].nlargest(topk).index]
-    else: X = X.loc[nz]
-    X = X.T; X.columns = X.columns.map(str); return X
+        # pick a safe minimum count
+        min_keep = min( max(200, min(2000, X.shape[0])), X.shape[0] )
+        # combine tiny var + tiny mad as a proxy
+        med = X.median(axis=1)
+        mad = (X.sub(med, axis=0).abs()).median(axis=1).astype(float).fillna(0.0)
+        proxy = (var + mad).astype(float)
+        keep = proxy.sort_values(ascending=False).head(min_keep).index
+        X = X.loc[keep]
+    else:
+        # normal path
+        usable = X.loc[nz]
+        if topk and usable.shape[0] > topk:
+            usable = usable.loc[var.loc[usable.index].nlargest(topk).index]
+        X = usable
+
+    # Final safety: transpose to samples×features and label columns
+    X = X.T
+    X.columns = X.columns.map(str)
+    if X.shape[0] < 2 or X.shape[1] < 2:
+        raise RuntimeError("Too few samples or features for PCA after robust selection.")
+    return X
 
 def detect_data_type_and_platform(X: pd.DataFrame) -> Tuple[str, str, Dict]:
     vals = X.values.ravel(); vals = vals[np.isfinite(vals)]
@@ -1223,12 +1252,36 @@ def run_pipeline(
     row_mean = expr_log2.mean(axis=1); row_std = expr_log2.std(axis=1, ddof=1).replace(0, np.nan)
     expr_z = expr_log2.sub(row_mean, axis=0).div(row_std, axis=0).replace([np.inf,-np.inf], np.nan).fillna(0)
 
-    # 5) impute + filter
-    expr_imputed = drop_zero_variance(row_mean_impute(expr_log2))
-    gene_vars = expr_imputed.var(axis=1)
-    pos = gene_vars[gene_vars > 0]
-    topk = min(pca_topk_features, len(pos)) if len(pos) > 0 else 0
-    expr_filtered = expr_imputed.loc[pos.nlargest(topk).index] if topk > 0 else expr_imputed.iloc[0:0]
+# 5) impute + filter  (ROBUST)
+expr_imputed = drop_zero_variance(row_mean_impute(expr_log2))
+
+# Try variance first
+gene_vars = expr_imputed.var(axis=1, ddof=1).astype(float).fillna(0.0)
+pos = gene_vars[gene_vars > 0]
+
+expr_filtered = None
+if len(pos) >= 2:
+    topk = min(pca_topk_features, len(pos))
+    expr_filtered = expr_imputed.loc[pos.nlargest(topk).index]
+else:
+    # Fallback: MAD-based selector
+    med = expr_imputed.median(axis=1)
+    mad = (expr_imputed.sub(med, axis=0).abs()).median(axis=1).astype(float).fillna(0.0)
+    mad_pos = mad[mad > 0]
+    if len(mad_pos) >= 2:
+        topk = min(pca_topk_features, len(mad_pos))
+        expr_filtered = expr_imputed.loc[mad_pos.nlargest(topk).index]
+    else:
+        # Last-resort: keep a small but non-empty slice
+        k = min(max(200, min(2000, expr_imputed.shape[0])), expr_imputed.shape[0])
+        expr_filtered = expr_imputed.head(k)
+
+# ensure dtype is float and no NaNs
+expr_filtered = (expr_filtered.replace([np.inf, -np.inf], np.nan)
+                              .apply(pd.to_numeric, errors="coerce")
+                              .astype(float)
+                              .fillna(0.0))
+
 
     # 6) harmonize (ComBat or fallback)
     meta["batch_collapsed"] = smart_batch_collapse(meta, min_batch_size_for_combat)
@@ -1889,6 +1942,7 @@ def run_pipeline_multi(
     if qa_warnings:
         out["qa_mapping_warnings"] = qa_warnings
     return out
+
 
 
 
