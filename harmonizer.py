@@ -396,7 +396,7 @@ def create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, figdir: st
 
     plt.figure(figsize=(12,6))
     grp_series = meta["group"] if "group" in meta.columns else pd.Series("ALL", index=meta.index)
-    groups_seen = list(pd.unique(grp_series.astype(str)))  # <-- FIXED: removed stray parenthesis
+    groups_seen = list(pd.unique(grp_series.astype(str)))
     for grp in groups_seen:
         cols = meta.index[grp_series==grp]
         vals = expr_harmonized[cols].values.ravel() if len(cols) else np.array([])
@@ -774,47 +774,72 @@ def run_pipeline(
     topk = min(pca_topk_features, len(pos)) if len(pos) > 0 else 0
     expr_filtered = expr_imputed.loc[pos.nlargest(topk).index] if topk > 0 else expr_imputed.iloc[0:0]
 
-    # 6) harmonize (ComBat or fallback)
+    # 6) harmonize (ComBat or fallback) — GUARDED against singleton batches
     meta["batch_collapsed"] = smart_batch_collapse(meta, min_batch_size_for_combat)
     if meta.index.duplicated().any():
         meta = _collapse_dupes_df_by_index(meta, how_num="median", keep="first")
-    meta_batch = meta["batch_collapsed"].reindex(expr_filtered.columns).fillna(meta["group"].reindex(expr_filtered.columns).astype(str))
-    if expr_filtered.shape[1] > 0 and expr_filtered.shape[0] > 0:
+    meta_batch = meta["batch_collapsed"].reindex(expr_filtered.columns).fillna(
+        meta["group"].reindex(expr_filtered.columns).astype(str)
+    )
+
+    batch_sizes = meta_batch.value_counts(dropna=True)
+    use_combat = (
+        _HAVE_SCANPY
+        and batch_sizes.size >= 2
+        and (batch_sizes >= min_batch_size_for_combat).all()  # no singleton batches
+        and expr_filtered.shape[0] > 0
+        and expr_filtered.shape[1] > 1
+    )
+
+    if use_combat:
         x_combat = _combat(expr_filtered, meta_batch)
         expr_harmonized = x_combat if x_combat is not None else _fallback_center(expr_filtered, meta_batch)
         mode = "ComBat" if x_combat is not None else "fallback_center"
     else:
-        expr_harmonized = expr_filtered.copy(); mode = "no_features"
+        expr_harmonized = _fallback_center(expr_filtered, meta_batch)
+        mode = "fallback_center"
 
-    # 7) PCA (fail-soft)
+    # 7) PCA (fail-soft with fallback to pre-harmonized features)
     pca_df = pd.DataFrame(index=expr_harmonized.columns); kpi = {}; pca_skipped_reason = None
+    pca_origin = "harmonized"
     try:
         Xc = safe_matrix_for_pca(zscore_rows(expr_harmonized), topk=topk)
-        if Xc.shape[0] < 2 or Xc.shape[1] < 2: raise RuntimeError("Too few samples or features for PCA.")
-        pca = PCA(n_components=min(6, Xc.shape[1]), random_state=42).fit(Xc)
-        Xp = pca.transform(Xc)
-        cols_to_join = [c for c in ["group","batch","batch_collapsed"] if c in meta.columns]
-        pca_df = (pd.DataFrame(Xp[:, :min(6, Xp.shape[1])],
-                               columns=[f"PC{i+1}" for i in range(min(6, Xp.shape[1]))],
-                               index=Xc.index).join(meta[cols_to_join], how="left"))
-        if "group" not in pca_df.columns: pca_df["group"] = "ALL"
-        meta["group"] = meta["group"].apply(normalize_group_value)
-        pca_df["group"] = pca_df["group"].fillna("ALL").apply(normalize_group_value)
+    except Exception as e1:
         try:
-            use = [c for c in ["PC1","PC2","PC3","PC4"] if c in pca_df.columns]
-            if len(use) >= 2:
-                Xs = pca_df[use].values
-                if meta["batch_collapsed"].nunique() > 1:
-                    kpi["silhouette_batch"] = float(silhouette_score(Xs, meta["batch_collapsed"].astype(str)))
-                if meta["group"].nunique() > 1:
-                    kpi["silhouette_group"] = float(silhouette_score(Xs, meta["group"].astype(str)))
-        except Exception:
-            pass
-        create_enhanced_pca_plots(pca_df, pca, meta, os.path.join(OUTDIR, "figs"), mode)
-        pca_loadings_plots(pca, expr_harmonized, os.path.join(OUTDIR, "figs"))
-        nonlinear_embedding_plots(Xc, meta, os.path.join(OUTDIR, "figs"), mode, make=True)
-    except Exception as e:
-        pca_skipped_reason = f"{type(e).__name__}: {e}"
+            Xc = safe_matrix_for_pca(zscore_rows(expr_filtered), topk=topk)
+            pca_origin = "pre-harmonization"
+        except Exception as e2:
+            pca_skipped_reason = f"Harmonized PCA failed ({type(e1).__name__}: {e1}); fallback PCA failed ({type(e2).__name__}: {e2})"
+            Xc = None
+
+    if Xc is not None:
+        try:
+            if Xc.shape[0] < 2 or Xc.shape[1] < 2: raise RuntimeError("Too few samples or features for PCA.")
+            pca = PCA(n_components=min(6, Xc.shape[1]), random_state=42).fit(Xc)
+            Xp = pca.transform(Xc)
+            cols_to_join = [c for c in ["group","batch","batch_collapsed"] if c in meta.columns]
+            pca_df = (pd.DataFrame(Xp[:, :min(6, Xp.shape[1])],
+                                   columns=[f"PC{i+1}" for i in range(min(6, Xp.shape[1]))],
+                                   index=Xc.index).join(meta[cols_to_join], how="left"))
+            if "group" not in pca_df.columns: pca_df["group"] = "ALL"
+            meta["group"] = meta["group"].apply(normalize_group_value)
+            pca_df["group"] = pca_df["group"].fillna("ALL").apply(normalize_group_value)
+            try:
+                use = [c for c in ["PC1","PC2","PC3","PC4"] if c in pca_df.columns]
+                if len(use) >= 2:
+                    Xs = pca_df[use].values
+                    if meta["batch_collapsed"].nunique() > 1:
+                        kpi["silhouette_batch"] = float(silhouette_score(Xs, meta["batch_collapsed"].astype(str)))
+                    if meta["group"].nunique() > 1:
+                        kpi["silhouette_group"] = float(silhouette_score(Xs, meta["group"].astype(str)))
+            except Exception:
+                pass
+            label_mode = mode if pca_origin == "harmonized" else f"{mode} (fallback: pre-harmonization)"
+            create_enhanced_pca_plots(pca_df, pca, meta, os.path.join(OUTDIR, "figs"), label_mode)
+            pca_loadings_plots(pca, expr_harmonized if pca_origin=="harmonized" else expr_filtered, os.path.join(OUTDIR, "figs"))
+            nonlinear_embedding_plots(Xc, meta, os.path.join(OUTDIR, "figs"), label_mode, make=True)
+        except Exception as e:
+            pca_skipped_reason = f"{type(e).__name__}: {e}"
 
     # 8) QC figs
     figs = []
@@ -838,18 +863,21 @@ def run_pipeline(
         volcano_and_ma_plots(df, k, os.path.join(OUTDIR, "figs"))
         heatmap_top_de(expr_log2, meta, df, k, os.path.join(OUTDIR, "figs"), topn=50)
 
-    # 11) GSEA (optional)
+    # 11) GSEA (optional) — stub (left as-is)
     gsea_dir = os.path.join(OUTDIR, "gsea"); os.makedirs(gsea_dir, exist_ok=True)
 
-    # 12) Save outputs
+    # 12) Save outputs + richer report
     expr_harmonized.to_csv(os.path.join(OUTDIR, "expression_harmonized.tsv"), sep="\t")
     pca_df.to_csv(os.path.join(OUTDIR, "pca_scores.tsv"), sep="\t")
+
+    genes_zero_std_after = int((expr_harmonized.std(axis=1, ddof=1).fillna(0) == 0).sum()) if expr_harmonized.shape[0] else 0
 
     rep = {
         "qc": {"zero_fraction": float(diags.get("zero_fraction", np.nan)),
                "value_range_approx": float(diags.get("value_range_approx", np.nan)),
                "harmonization_mode": mode,
                "platform": platform,
+               "genes_zero_std_after_harmonization": genes_zero_std_after,
                **kpi},
         "shapes": {"genes": int(combined_expr.shape[0]), "samples": int(combined_expr.shape[1])},
         "notes": {}
@@ -1120,6 +1148,3 @@ def run_pipeline_multi(
         "summary_png_path": meta.get("summary_png_path"),
     }
     return out
-
-
-
