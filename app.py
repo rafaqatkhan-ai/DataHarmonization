@@ -1,4 +1,4 @@
-# app.py — now supports multi-dataset mode + Presenter Mode
+# app.py — supports multi-dataset mode + Presenter Mode (with robust PCA handling)
 import os, io, tempfile, shutil, json
 import streamlit as st
 import pandas as pd
@@ -38,7 +38,7 @@ if "run_token" not in st.session_state: st.session_state.run_token = None
 if "multi" not in st.session_state: st.session_state.multi = None
 
 # =========================
-# THEME SELECTOR (non-black)
+# THEME SELECTOR
 # =========================
 theme = st.selectbox("Theme",
     ["Light Gray","Soft Off-White","Deep Navy","Slate Blue"],
@@ -126,9 +126,6 @@ mode = st.radio(
 )
 st.caption("Upload expression data and corresponding metadata, then click **Run Harmonization**.")
 
-
-
-
 # ---------------- Expression upload ----------------
 single_expr_file = None
 normal_file = atypia_file = hpv_pos_file = hpv_neg_file = None
@@ -169,7 +166,6 @@ with st.expander("2) Upload Metadata (TSV/CSV/XLSX) [skip this for multi-dataset
                 mprev = pd.read_csv(bio, sep=None, engine="python")
             st.caption(f"Detected metadata columns: {list(mprev.columns)}")
 
-            # Batch preview (auto-guess with same logic as harmonizer)
             from collections import Counter
             _BATCH_HINTS = ["batch","Batch","BATCH","center","Center","site","Site","location","Location","series","Series",
                             "geo_series","GEO_series","run","Run","lane","Lane","plate","Plate","sequencer","Sequencer",
@@ -367,7 +363,15 @@ with tabs[0]:
             st.metric("Silhouette (batch)", f'{sil_batch:.2f}' if isinstance(sil_batch, (int, float)) else "—")
             st.markdown('<div class="smallcaps">Lower is better</div></div>', unsafe_allow_html=True)
 
+        # Extra diagnostics to make PCA issues obvious
+        with st.expander("Diagnostics"):
+            st.write({
+                "harmonization_mode": qc.get("harmonization_mode"),
+                "genes_zero_std_after_harmonization": qc.get("genes_zero_std_after_harmonization", "—"),
+                "platform": qc.get("platform"),
+            })
         st.json(report if report else {"info": "report.json not found"})
+
         fig_dir = out_curr["figdir"]
         previews = ["dist_pre_vs_post_log2.png","pca_clean_groups.png","enhanced_pca_analysis.png"]
         show = [f for f in previews if os.path.exists(os.path.join(fig_dir, f))]
@@ -555,7 +559,7 @@ with tabs[6]:
                                      file_name="harmonization_results.zip", mime="application/zip",
                                      use_container_width=True, key=f"dl_zip_multi__{run_id}")
 
-# ---- Presenter Mode (clean, board-friendly summary)
+# ---- Presenter Mode
 with tabs[7]:
     st.markdown("### 🎤 Presenter Mode")
     st.caption("A concise, visual summary for stakeholders. (Auto-populates after a multi-dataset run.)")
@@ -585,25 +589,20 @@ with tabs[7]:
             except Exception:
                 pass
 
-        # Header KPIs
         k1,k2,k3,k4 = st.columns(4)
         with k1: st.metric("Datasets", n_datasets)
         with k2: st.metric("Overlap genes", f"{overlap:,}")
         with k3: st.metric("Combined run", "Yes" if combined else "No")
         with k4: st.metric("Significant genes (FDR<0.1)", f"{sig_count:,}")
 
-        # Hero plot
         if summary_png and os.path.exists(summary_png):
             st.image(summary_png, caption="Comprehensive Meta-analysis Overview", use_column_width=True)
 
-        # Top candidates
         if len(top_rows):
             st.write("#### Top biomarker candidates (meta)")
             st.dataframe(top_rows[["z_meta","p_meta","q_meta","consistent_dir","consistency","meta_log2FC_proxy"]], use_container_width=True)
 
-        # Narrative
         if summary_txt and os.path.exists(summary_txt):
             with open(summary_txt, "r") as fh:
                 st.write("#### Key Findings (ready to copy)")
                 st.code(fh.read(), language="markdown")
-
