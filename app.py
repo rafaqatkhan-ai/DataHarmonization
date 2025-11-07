@@ -4,6 +4,7 @@ import datetime as _dt
 
 import streamlit as st
 import pandas as pd
+import altair as alt  # for live PCA fallback scatter
 import harmonizer as hz
 
 
@@ -41,6 +42,7 @@ if "multi" not in st.session_state: st.session_state.multi = None
 # cache for QA artifacts (dataset summary + evaluation)
 if "ds_summary_df" not in st.session_state: st.session_state.ds_summary_df = None
 if "eval_json" not in st.session_state: st.session_state.eval_json = None
+if "geo_datasets_queue" not in st.session_state: st.session_state.geo_datasets_queue = []
 
 # =========================
 # THEME SELECTOR (non-black)
@@ -114,7 +116,7 @@ st.markdown("""
 .centered-title{font-size:2.6rem;font-weight:900;text-align:center;
 background:linear-gradient(90deg,#1e3a8a,#2563eb,#6366f1,#7c3aed);
 background-size:300% 300%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:colorShift 8s ease infinite;margin-top:-0.5rem}
-@keyframes colorShift{0%{background-position:0% 50%}50%{background-position=100% 50%}100%{background-position:0% 50%}}
+@keyframes colorShift{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
 .subtitle{text-align:center;opacity:.9;font-size:1rem;margin-top:-0.6rem;font-style:italic}
 </style>
 <h1 class="centered-title"><span>🧬</span> Data Harmonization & QC Suite <span>🧬</span></h1>
@@ -255,12 +257,12 @@ if mode == "Multiple datasets (each has its own metadata)":
                     ds_list, ds_summary_df, eval_json = hz.fetch_geo_as_datasets(accessions)
                     multi_datasets.extend(ds_list)
                     st.success(f"Fetched {len(ds_list)} datasets from GEO.")
-                    # store global QA artifacts for the run
                     st.session_state.ds_summary_df = ds_summary_df
                     st.session_state.eval_json = eval_json
                 except Exception as e:
                     st.error(f"GEO fetch failed: {e}")
-                        # ---- Merge any datasets queued from the keyword search panel ----
+
+    # ---- Merge any datasets queued from the keyword search panel ----
     queued = st.session_state.get("geo_datasets_queue") or []
     if queued:
         st.info(f"Also including {len(queued)} dataset(s) fetched from GEO search.")
@@ -270,6 +272,7 @@ if mode == "Multiple datasets (each has its own metadata)":
         combine_thresh = st.number_input("Minimum overlapping genes to combine", min_value=500, max_value=100000,
                                          value=3000, step=250,
                                          help="If overlap ≥ this, datasets are combined; otherwise analyzed separately.")
+
 # ==== NEW: GEO search & fetch by keywords/name (not just GSE IDs) ====
 with st.expander("Fetch datasets from GEO by name/keywords"):
     q = st.text_input("Enter disease/dataset keywords (e.g., 'cervical cancer')", value="")
@@ -281,9 +284,6 @@ with st.expander("Fetch datasets from GEO by name/keywords"):
         try:
             queries = [q] if q.strip() else []
             datasets, ds_summary_df, eval_rows = hz.prepare_datasets_from_geo_queries(queries, max_per_query=int(n_top))
-
-            # Stash for use in multi-dataset mode
-            st.session_state.setdefault("geo_datasets_queue", [])
             st.session_state["geo_datasets_queue"].extend(datasets)
             st.session_state.ds_summary_df = ds_summary_df
             st.session_state.eval_json = eval_rows
@@ -298,7 +298,6 @@ if run:
     if mode == "Multiple datasets (each has its own metadata)":
         if not multi_datasets or len(multi_datasets) < 2:
             st.error("Please provide at least two datasets (each with expression + metadata)."); st.stop()
-        # When constructing kwargs_multi right before hz.run_pipeline_multi(...)
         kwargs_multi = {
             "datasets": multi_datasets,
             "attempt_combine": True,
@@ -306,12 +305,10 @@ if run:
             "out_root": out_dir,
             "pca_topk_features": int(pca_topk),
             "make_nonlinear": do_nonlinear,
-            # NEW: wire QA artifacts (optional; saved per-dataset and combined)
             "dataset_summary_df": st.session_state.get("ds_summary_df"),
             "evaluation_results_json": st.session_state.get("eval_json"),
-            }    
-
-        # try auto-discover QA artifacts if not set
+        }
+        # Try auto-discover QA artifacts if not set
         if kwargs_multi["dataset_summary_df"] is None:
             for pat in ["/mnt/data/dataset_summary*.csv", "/mnt/data/dataset_summary*.tsv", "/mnt/data/dataset_summary*.*"]:
                 hits = glob.glob(pat)
@@ -468,15 +465,62 @@ with tabs[1]:
 
 # ---- PCA & Embeddings
 with tabs[2]:
-    if not out_curr: st.info("No run loaded yet.")
+    if not out_curr:
+        st.info("No run loaded yet. Upload data and click **Run Harmonization** (Single expression matrix).")
     else:
         fig_dir = out_curr["figdir"]
+
+        # (1) Show PCA skip reason if any + list what exists in figs dir
+        report = {}
+        try:
+            with open(out_curr["report_json"], "r") as fh:
+                report = json.load(fh)
+        except Exception:
+            report = {}
+        skip_reason = (report.get("notes", {}) or {}).get("pca_skipped_reason")
+        if skip_reason:
+            st.warning(f"PCA was skipped: {skip_reason}")
+
+        try:
+            fig_listing = sorted(os.listdir(fig_dir))
+            with st.expander("Debug: files in figures directory"):
+                st.write(fig_listing)
+        except Exception as e:
+            st.info(f"(Could not list figures directory: {e})")
+
+        # (2) Try to show pre-generated PNGs
+        shown_any = False
         pcs = ["pca_clean_groups.png","enhanced_pca_analysis.png","pca_loadings_pc1.png",
                "pca_loadings_pc2.png","umap_by_group.png","tsne_by_group.png"]
-        st.write("### PCA / UMAP / t-SNE")
         for f in pcs:
             p = os.path.join(fig_dir, f)
-            if os.path.exists(p): st.image(p, caption=os.path.basename(p), use_column_width=True)
+            if os.path.exists(p):
+                st.image(p, caption=os.path.basename(p), use_column_width=True)
+                shown_any = True
+
+        # (3) Fallback: render live from pca_scores.tsv if no images were found
+        if not shown_any:
+            scores_path = os.path.join(out_curr["outdir"], "pca_scores.tsv")
+            if os.path.exists(scores_path):
+                try:
+                    df = pd.read_csv(scores_path, sep="\t", index_col=0)
+                    if {"PC1","PC2"}.issubset(df.columns):
+                        st.info("No PCA PNGs found — showing a live PCA scatter from pca_scores.tsv.")
+                        df_reset = df.reset_index().rename(columns={"index": "sample"})
+                        grp_col = "group" if "group" in df_reset.columns else None
+                        chart = alt.Chart(df_reset).mark_circle(size=90).encode(
+                            x=alt.X("PC1:Q", title="PC1"),
+                            y=alt.Y("PC2:Q", title="PC2"),
+                            color=(alt.Color(f"{grp_col}:N").legend(title="Group") if grp_col else alt.value("#4B5563")),
+                            tooltip=["sample"] + ([grp_col] if grp_col else []) + ["PC1","PC2"]
+                        ).properties(height=520)
+                        st.altair_chart(chart, use_container_width=True)
+                    else:
+                        st.warning("pca_scores.tsv loaded, but PC1/PC2 not found.")
+                except Exception as e:
+                    st.warning(f"Could not render fallback PCA scatter: {e}")
+            else:
+                st.warning("No PCA figures or pca_scores.tsv found. Try re-running Harmonization in Single expression mode.")
 
 # ---- DE & GSEA
 with tabs[3]:
@@ -522,7 +566,6 @@ with tabs[4]:
         meta_path = os.path.join(out_curr["outdir"], "metadata.tsv")
         st.caption(f"Run: **{run_id}**  •  Outdir: `{out_curr['outdir']}`")
         if os.path.exists(outliers_path):
-            mtime = int(os.path.getmtime(outliers_path)); cache_buster = f"{run_id}__{mtime}"
             try:
                 df = pd.read_csv(outliers_path, sep="\t", index_col=0)
                 if os.path.exists(meta_path):
@@ -537,10 +580,10 @@ with tabs[4]:
                 else:
                     display_df = df.rename(columns={"IsolationForest":"IsolationForest_flag","LOF":"LOF_flag"})
                 st.write("### Outlier flags (1 = outlier)")
-                st.dataframe(display_df, use_container_width=True, key=f"outliers_df__{cache_buster}")
+                st.dataframe(display_df, use_container_width=True, key=f"outliers_df__{run_id}")
                 with open(outliers_path, "rb") as fh:
                     safe_download_button("⬇️ Download outlier table", fh.read(), file_name="outliers.tsv",
-                                         mime="text/tab-separated-values", key=f"dl_outliers__{cache_buster}")
+                                         mime="text/tab-separated-values", key=f"dl_outliers__{run_id}")
             except Exception as e:
                 st.warning(f"Could not load outliers for this run: {e}")
         else:
@@ -675,28 +718,9 @@ with tabs[7]:
 
         if len(top_rows):
             st.write("#### Top biomarker candidates (meta)")
-            st.dataframe(top_rows[["z_meta","p_meta","q_meta","consistent_dir","consistency","meta_log2FC_proxy"]], use_column_width=True)
+            st.dataframe(top_rows[["z_meta","p_meta","q_meta","consistent_dir","consistency","meta_log2FC_proxy"]], use_container_width=True)
 
         if summary_txt and os.path.exists(summary_txt):
+            st.write("#### Key Findings (ready to copy)")
             with open(summary_txt, "r") as fh:
-                st.write("#### Key Findings (ready to copy)")
                 st.code(fh.read(), language="markdown")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
