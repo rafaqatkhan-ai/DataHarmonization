@@ -3,9 +3,27 @@ import io
 import re
 import json
 from typing import Dict, List, Optional, Tuple
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+
+# ---- Safe imports with helpful error messages ----
+_MISSING_GOOGLE_MSG = (
+    "Google API client libraries are not installed. "
+    "Please add to requirements.txt: "
+    "'google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib httplib2'"
+)
+
+try:
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseDownload
+    from googleapiclient.errors import HttpError  # re-exported for app
+except Exception as _e:
+    Credentials = None
+    build = None
+    MediaIoBaseDownload = None
+    HttpError = Exception  # fallback type
+    _IMPORT_ERROR = _e
+else:
+    _IMPORT_ERROR = None
 
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
@@ -24,6 +42,8 @@ def extract_drive_id(url: str) -> Optional[str]:
 
 # -------------------- Drive client --------------------
 def build_drive_client_from_sa_bytes(sa_bytes: bytes):
+    if _IMPORT_ERROR is not None or Credentials is None or build is None:
+        raise ImportError(_MISSING_GOOGLE_MSG) from _IMPORT_ERROR
     info = json.loads(sa_bytes.decode("utf-8"))
     creds = Credentials.from_service_account_info(info, scopes=DRIVE_SCOPES)
     return build("drive", "v3", credentials=creds, cache_discovery=False)
@@ -49,6 +69,8 @@ def list_children(drive, folder_id: str) -> List[dict]:
     return out
 
 def download_file_to_bytes(drive, file_id: str) -> io.BytesIO:
+    if MediaIoBaseDownload is None:
+        raise ImportError(_MISSING_GOOGLE_MSG)  # safety
     bio = io.BytesIO()
     req = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
     downloader = MediaIoBaseDownload(bio, req)
@@ -62,9 +84,6 @@ def download_file_to_bytes(drive, file_id: str) -> io.BytesIO:
 def find_prep_leaves(drive, root_folder_id: str) -> List[Tuple[str, str]]:
     """
     Return [(prep_folder_id, full_path_str), ...]
-    We consider a 'prep leaf' any folder named 'prep' (case-insensitive)
-    and we include it even if it has files or more folders; we still traverse
-    deeper to capture nested 'prep' as well, but dedupe IDs later.
     """
     results = []
 
@@ -110,17 +129,10 @@ def is_meta(name: str) -> bool:
 # -------------------- Collect plan --------------------
 def collect_from_root(drive, root_folder_url: str):
     """
-    Return one of:
-      {"mode":"single",
-       "single": (counts_bio, counts_name),
-       "meta": (meta_bio, meta_name)}
-    OR
-      {"mode":"multi_files",
-       "groups": {group_name: (bio, name), ...},
-       "meta": (bio, name)}
-    OR
-      {"mode":"multi_dataset",
-       "datasets":[{"geo":label,"counts":(bio,name),"meta":(bio,name)}, ...]}
+    Returns one of:
+      {"mode":"single", "single": (counts_bio, counts_name), "meta": (meta_bio, meta_name)}
+      {"mode":"multi_files", "groups": {group: (bio, name)}, "meta": (bio, name)}
+      {"mode":"multi_dataset", "datasets":[{"geo":label,"counts":(bio,name),"meta":(bio,name)}]}
     """
     root_id = extract_drive_id(root_folder_url)
     if not root_id:
@@ -134,7 +146,7 @@ def collect_from_root(drive, root_folder_url: str):
     for prep_id, path in prep_leaves:
         items = list_children(drive, prep_id)
 
-        # Resolve shortcuts to their targets (keep user-visible name)
+        # Resolve shortcuts
         resolved = []
         for f in items:
             if f.get("mimeType") == "application/vnd.google-apps.shortcut":
@@ -167,34 +179,28 @@ def collect_from_root(drive, root_folder_url: str):
 
         if counts_payload:
             datasets.append({
-                "label": path,                 # explicit dataset label
-                "counts": counts_payload,      # list of (bio, name)
-                "meta": meta_payload           # list of (bio, name)
+                "label": path,
+                "counts": counts_payload,
+                "meta": meta_payload
             })
 
     if not datasets:
         raise RuntimeError("Found 'prep' folders, but no usable count/meta files inside them.")
 
-    # Decide global mode based on what was discovered
-    # A) Single dataset, exactly 1 counts + at least 1 meta -> single
     if len(datasets) == 1 and len(datasets[0]["counts"]) == 1 and len(datasets[0]["meta"]) >= 1:
         c_bio, c_name = datasets[0]["counts"][0]
         m_bio, m_name = datasets[0]["meta"][0]
         return {"mode": "single", "single": (c_bio, c_name), "meta": (m_bio, m_name)}
 
-    # B) Single dataset, 2+ counts + 1 meta -> multi_files (one per group)
     if len(datasets) == 1 and len(datasets[0]["counts"]) >= 2 and len(datasets[0]["meta"]) >= 1:
-        # Derive groups from file names
         groups = {}
         for (bio, name) in datasets[0]["counts"]:
             g = re.sub(r"\.[^.]+$", "", name).strip()
             groups[g or f"group_{len(groups)+1}"] = (bio, name)
         return {"mode": "multi_files", "groups": groups, "meta": datasets[0]["meta"][0]}
 
-    # C) 2+ datasets each with ≥1 counts and ≥1 meta -> multi_dataset
     md = []
     def pick_best(lst, is_fn):
-        # prefer the item that best matches the function name (counts/meta)
         lst_sorted = sorted(lst, key=lambda x: (0 if is_fn(x[1]) else 1, len(x[1])))
         return lst_sorted[0]
 
@@ -207,7 +213,6 @@ def collect_from_root(drive, root_folder_url: str):
     if len(md) >= 2:
         return {"mode": "multi_dataset", "datasets": md}
 
-    # Otherwise, surface details to help debug odd structures
     raise RuntimeError(
         f"Drive discovery did not fit expected patterns. "
         f"Found datasets: {[(x['label'], len(x['counts']), len(x['meta'])) for x in datasets]}"
