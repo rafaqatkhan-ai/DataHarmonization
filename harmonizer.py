@@ -863,7 +863,7 @@ def run_pipeline(
         volcano_and_ma_plots(df, k, os.path.join(OUTDIR, "figs"))
         heatmap_top_de(expr_log2, meta, df, k, os.path.join(OUTDIR, "figs"), topn=50)
 
-    # 11) GSEA (optional) — stub (left as-is)
+    # 11) GSEA (optional) — stub
     gsea_dir = os.path.join(OUTDIR, "gsea"); os.makedirs(gsea_dir, exist_ok=True)
 
     # 12) Save outputs + richer report
