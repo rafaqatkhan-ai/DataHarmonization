@@ -178,10 +178,13 @@ class DriveClient:
                     continue
 
                 for cfile, mfile in pairs:
-                    # build unique label like: allergic_disease :: df62cf82/.../prep
+                    # build unique, descriptive label like:
+                    # allergic_disease :: df62cf82/.../prep  [counts: prep_count.tsv | meta: prep_meta.tsv]
                     short_rel = relpath.replace("\\", "/").strip("/")
-                    base_label = f"{disease.name} :: {short_rel or prep.name}"
+                    base_label = f"{disease.name} :: {short_rel or prep.name}  [counts: {cfile.name} | meta: {mfile.name}]"
                     label = self._uniqify(base_label, label_seen)
+
+                    
 
                     hits.append(DatasetHit(
                         label=label,
