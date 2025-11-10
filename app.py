@@ -28,6 +28,7 @@ if "run_token" not in st.session_state: st.session_state.run_token = None
 if "multi" not in st.session_state: st.session_state.multi = None
 if "last_plan" not in st.session_state: st.session_state.last_plan = None
 if "input_source" not in st.session_state: st.session_state.input_source = "Manual upload"
+if "selected_dataset" not in st.session_state: st.session_state.selected_dataset = None  # NEW: persist chosen dataset
 
 # =========================
 # THEME SELECTOR
@@ -55,6 +56,7 @@ def apply_theme(t: str):
         .stButton>button{background:linear-gradient(90deg,#10b981,#059669)!important;color:#fff!important;border:none!important;border-radius:8px!important;padding:.5rem 1rem!important;font-weight:600!important}
         .stButton>button:hover{background:linear-gradient(90deg,#34d399,#10b981)!important;transform:translateY(-2px)!important;box-shadow:0 4px 10px rgba(16,185,129,.25)!important}
         .stTabs [data-baseweb="tab-list"]{gap:16px!important}
+        .stTabs [data-testid="stVerticalBlock"]{overflow:visible!important}
         .stTabs [data-baseweb="tab"]{background:#fff7ed!important;color:#7c2d12!important;border:1px solid #fed7aa!important;border-radius:10px!important;font-weight:700!important;min-width:130px!important;padding:0.6rem 1.2rem!important}
         .metric-card{background:#ffffff!important;border:1px solid #f3f4f6!important;border-radius:12px!important;padding:14px 16px!important}
         .smallcaps{color:#6b7280!important}
@@ -98,7 +100,7 @@ st.markdown("""
 .centered-title{font-size:2.6rem;font-weight:900;text-align:center;
 background:linear-gradient(90deg,#1e3a8a,#2563eb,#6366f1,#7c3aed);
 background-size:300% 300%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:colorShift 8s ease infinite;margin-top:-0.5rem}
-@keyframes colorShift{0%{background-position:0% 50%}50%{background-position=100% 50%}100%{background-position:0% 50%}}
+@keyframes colorShift{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
 .subtitle{text-align:center;opacity:.9;font-size:1rem;margin-top:-0.6rem;font-style:italic}
 </style>
 <h1 class="centered-title"><span>🧬</span> Data Harmonization & QC Suite <span>🧬</span></h1>
@@ -301,10 +303,15 @@ if run:
                     kwargs_multi["out_root"] = os.path.join(out_dir, run_id)
                     multi_out = hz.run_pipeline_multi(**kwargs_multi)
                     st.session_state.run_id = run_id
-                    # Keep ALL runs; default to combined if available
+                    # Keep ALL runs; default selection to Combined (if present) else first dataset
                     st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
                     st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
                     st.session_state.multi = multi_out
+                    # NEW: pick default dataset in selector
+                    if multi_out.get("combined"): 
+                        st.session_state.selected_dataset = "[Combined]"
+                    else:
+                        st.session_state.selected_dataset = next(iter(multi_out["runs"].keys()))
                 _clear_caches()
             except Exception as e:
                 st.error(f"Multi-dataset run failed: {e}")
@@ -354,12 +361,15 @@ if run:
                     st.session_state.run_id = run_id
                     st.session_state.out = out
                     st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
+                    st.session_state.multi = None
+                    st.session_state.selected_dataset = None
                 _clear_caches()
             except Exception as e:
                 st.error(f"Run failed: {e}")
                 st.stop()
     else:
         # ----- Drive ingestion path -----
+        json_file = st.session_state.get("sa_json") or st.session_state.get("json_file") or json_file
         if not json_file:
             st.error("Please upload your Service Account JSON."); st.stop()
         if not drive_link.strip():
@@ -401,6 +411,7 @@ if run:
                 st.session_state.out = out
                 st.session_state.run_token = f"{st.session_state.run_id}-{_dt.datetime.now().timestamp():.0f}"
                 st.session_state.multi = None
+                st.session_state.selected_dataset = None
             _clear_caches()
 
         elif mode == "multi_files_one_meta":
@@ -423,6 +434,7 @@ if run:
                 st.session_state.out = out
                 st.session_state.run_token = f"{st.session_state.run_id}-{_dt.datetime.now().timestamp():.0f}"
                 st.session_state.multi = None
+                st.session_state.selected_dataset = None
             _clear_caches()
 
         elif mode == "multi_dataset":
@@ -453,6 +465,11 @@ if run:
                 st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
                 st.session_state.run_token = f"{st.session_state.run_id}-{_dt.datetime.now().timestamp():.0f}"
                 st.session_state.multi = multi_out
+                # NEW: default selected dataset
+                if multi_out.get("combined"):
+                    st.session_state.selected_dataset = "[Combined]"
+                else:
+                    st.session_state.selected_dataset = next(iter(multi_out["runs"].keys()))
             _clear_caches()
         else:
             st.error(f"Unexpected plan mode: {mode}")
@@ -463,36 +480,54 @@ if run:
 # =========================
 st.subheader("Results")
 
-# Helper: load a run dict (out) by reference key
-def _run_out_dict(run_dict_or_path):
-    return run_dict_or_path
+# Helper: pick current dataset output based on selector
+def _get_current_out():
+    multi_ctx = st.session_state.get("multi")
+    sel = st.session_state.get("selected_dataset")
+    if multi_ctx and isinstance(multi_ctx, dict) and multi_ctx.get("runs"):
+        # Build options
+        has_combined = bool(multi_ctx.get("combined"))
+        run_keys = list(multi_ctx["runs"].keys())
+        # Ensure selection is valid
+        valid = (["[Combined]"] if has_combined else []) + run_keys
+        if not sel or sel not in valid:
+            # initialize default
+            st.session_state.selected_dataset = "[Combined]" if has_combined else (run_keys[0] if run_keys else None)
+            sel = st.session_state.selected_dataset
+        if sel == "[Combined]":
+            return multi_ctx.get("combined") or st.session_state.get("out")
+        return multi_ctx["runs"][sel]
+    # single run
+    return st.session_state.get("out")
 
-# --- replace the “NEW: selector for multi runs …” block with this ---
-
+# Sidebar selector (always visible when multi)
 multi_ctx = st.session_state.get("multi")
 if multi_ctx and isinstance(multi_ctx, dict) and multi_ctx.get("runs"):
+    has_combined = bool(multi_ctx.get("combined"))
     run_keys = list(multi_ctx["runs"].keys())
-    # Sidebar selector (more prominent)
+    options = (["[Combined]"] if has_combined else []) + run_keys
+    default_index = 0
+    if st.session_state.get("selected_dataset") in options:
+        default_index = options.index(st.session_state["selected_dataset"])
     st.sidebar.markdown("### 📂 Dataset view")
-    selector_options = (["[Combined]"] if multi_ctx.get("combined") else []) + run_keys
-    selected_key = st.sidebar.selectbox("Select dataset", selector_options, index=0)
-    if selected_key == "[Combined]":
-        out_curr = multi_ctx.get("combined") or st.session_state.get("out")
-    else:
-        out_curr = multi_ctx["runs"][selected_key]
-
-    # Quick shortcuts (shows even if you’re on another tab)
+    selected_key = st.sidebar.selectbox("Select dataset", options, index=default_index, key="selected_dataset")
     with st.sidebar.expander("Per-dataset quick links", expanded=False):
+        if has_combined:
+            st.write("• **[Combined]**")
+            st.caption(multi_ctx["combined"]["outdir"])
         for name in run_keys:
             outdir = multi_ctx["runs"][name]["outdir"]
             st.write(f"• **{name}**")
             st.caption(outdir)
-else:
-    out_curr = st.session_state.get("out")
 
-# Build tabs
-tabs = st.tabs(["Overview","QC","PCA & Embeddings","DE & GSEA","Outliers","Files","Multi-dataset Summary","Presenter Mode","Comparisons"])
+out_curr = _get_current_out()
 run_id = st.session_state.get("run_id")
+
+# Build tabs (NEW: added 'Dataset Index')
+tabs = st.tabs([
+    "Overview","QC","PCA & Embeddings","DE & GSEA","Outliers","Files",
+    "Dataset Index","Multi-dataset Summary","Presenter Mode","Comparisons"
+])
 
 # ---- Overview
 with tabs[0]:
@@ -516,7 +551,8 @@ with tabs[0]:
             st.markdown('<div class="smallcaps">Features detected</div></div>', unsafe_allow_html=True)
         with kcol3:
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-            st.metric("Zero fraction", f'{qc.get("zero_fraction", 0):.2f}')
+            zf = qc.get("zero_fraction", None)
+            st.metric("Zero fraction", f'{zf:.2f}' if isinstance(zf, (int, float)) else "—")
             st.markdown('<div class="smallcaps">Approx. sparsity</div></div>', unsafe_allow_html=True)
         with kcol4:
             st.markdown('<div class="metric-card">', unsafe_allow_html=True)
@@ -663,8 +699,54 @@ with tabs[5]:
             except Exception as e:
                 st.warning(f"Could not open ZIP for download: {e}")
 
-# ---- Multi-dataset Summary (existing + kept)
+# ---- NEW: Dataset Index (browse every dataset, switch quickly)
 with tabs[6]:
+    multi = st.session_state.get("multi")
+    if not multi or not multi.get("runs"):
+        st.info("Dataset Index becomes available after a multi-dataset run.")
+    else:
+        runs = multi["runs"]
+        # Summary table
+        rows = []
+        for name, r in runs.items():
+            rep = {}
+            try:
+                rep = json.load(open(r["report_json"], "r"))
+            except Exception:
+                pass
+            shp = rep.get("shapes", {})
+            qc = rep.get("qc", {})
+            rows.append({
+                "dataset": name,
+                "outdir": r.get("outdir",""),
+                "samples": shp.get("samples", None),
+                "genes": shp.get("genes", None),
+                "zero_fraction": qc.get("zero_fraction", None),
+                "platform": qc.get("platform", None),
+            })
+        st.write("### All datasets in this run")
+        st.dataframe(pd.DataFrame(rows).set_index("dataset"), use_container_width=True)
+
+        # Individual previews + switcher
+        st.write("### Quick previews")
+        for name, r in runs.items():
+            with st.expander(name, expanded=False):
+                outdir = r["outdir"]; figdir = r["figdir"]
+                st.caption(outdir)
+                imgs = ["pca_clean_groups.png","enhanced_pca_analysis.png","dist_pre_vs_post_log2.png"]
+                cols = st.columns(3)
+                for i, f in enumerate(imgs):
+                    p = os.path.join(figdir, f)
+                    if os.path.exists(p):
+                        with cols[i % 3]:
+                            st.image(p, caption=f, use_column_width=True)
+                # Switch button
+                if st.button(f"🔀 Switch to: {name}", key=f"switch_{name}"):
+                    st.session_state.selected_dataset = name
+                    st.experimental_rerun()
+
+# ---- Multi-dataset Summary (existing + kept)
+with tabs[7]:
     multi = st.session_state.get("multi")
     if not multi:
         st.info("No multi-dataset run in this session.")
@@ -720,7 +802,7 @@ with tabs[6]:
                                      use_container_width=True, key=f"dl_zip_multi__{run_id}")
 
 # ---- Presenter Mode (kept)
-with tabs[7]:
+with tabs[8]:
     st.markdown("### 🎤 Presenter Mode")
     st.caption("A concise, visual summary for stakeholders. (Auto-populates after a multi-dataset run.)")
 
@@ -768,7 +850,7 @@ with tabs[7]:
                 st.code(fh.read(), language="markdown")
 
 # ---- NEW: Comparisons (pairwise similarities across datasets)
-with tabs[8]:
+with tabs[9]:
     multi = st.session_state.get("multi")
     if not multi or not multi.get("runs"):
         st.info("Comparisons are available after a multi-dataset run.")
@@ -853,4 +935,3 @@ with tabs[8]:
 
         st.caption("Tip: Higher intersections and Jaccard suggest stronger similarity across datasets. "
                    "Meta-analysis above already aggregates signals from all datasets.")
-
