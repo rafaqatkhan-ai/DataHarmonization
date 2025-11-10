@@ -18,6 +18,7 @@ warnings.filterwarnings("ignore", message="invalid value encountered")
 
 # ---------- Optional imports ----------
 _HAVE_SCANPY = _HAVE_GSEAPY = _HAVE_UMAP = _HAVE_TSNE = False
+_HAVE_HARMONY = _HAVE_MNNPY = False
 try:
     import scanpy as sc, anndata as ad
     _HAVE_SCANPY = True
@@ -36,6 +37,16 @@ except Exception:
 try:
     from sklearn.manifold import TSNE
     _HAVE_TSNE = True
+except Exception:
+    pass
+try:
+    import harmonypy as hm
+    _HAVE_HARMONY = True
+except Exception:
+    pass
+try:
+    import mnnpy
+    _HAVE_MNNPY = True
 except Exception:
     pass
 
@@ -217,9 +228,7 @@ def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFra
                 if isinstance(obj, (str, os.PathLike))
                 else pd.read_excel(_as_bytesio_seekable(obj), engine="openpyxl"))
 
-    # Route text-like / unknown suffixes through the robust reader
     return _read_text(metadata_obj if is_pathlike else _as_bytesio_seekable(metadata_obj))
-
 
 # ---------------- Batch detection ----------------
 _BATCH_HINTS = [
@@ -298,7 +307,7 @@ def detect_data_type_and_platform(X: pd.DataFrame) -> Tuple[str, str, Dict]:
     diags = {"zero_fraction": zero_frac, "value_range_approx": rng}
     return data_type, platform, diags
 
-# ---------------- Batch harmonization ----------------
+# ---------------- Batch harmonization (expression level) ----------------
 def _combat(expr_imputed: pd.DataFrame, meta_batch: pd.Series) -> Optional[pd.DataFrame]:
     if not _HAVE_SCANPY: return None
     try:
@@ -311,6 +320,51 @@ def _combat(expr_imputed: pd.DataFrame, meta_batch: pd.Series) -> Optional[pd.Da
     except Exception:
         return None
 
+def _ols_residualize_by_batch(expr_imputed: pd.DataFrame, meta: pd.DataFrame, keep_group: bool = True) -> pd.DataFrame:
+    """
+    Per-gene OLS: y ~ 1 + group + batch  --> remove batch coefficients, keep intercept (+ group if keep_group)
+    Works with any number of batches. Avoids degenerate columns automatically.
+    """
+    X = expr_imputed.copy()
+    samples = list(X.columns)
+    meta_use = meta.reindex(samples).copy()
+    # design: intercept + (optional) group + batch (one-hot, drop first in each to avoid collinearity)
+    df_design = pd.DataFrame(index=samples)
+    df_design["intercept"] = 1.0
+    if "group" in meta_use.columns and keep_group:
+        g = meta_use["group"].astype(str).fillna("ALL")
+        G = pd.get_dummies(g, drop_first=True, dtype=float)
+        G.columns = [f"group::{c}" for c in G.columns]
+        df_design = pd.concat([df_design, G], axis=1)
+    b = meta_use.get("batch_collapsed", meta_use.get("batch", pd.Series("B0", index=samples))).astype(str)
+    B = pd.get_dummies(b, drop_first=True, dtype=float)
+    B.columns = [f"batch::{c}" for c in B.columns]
+    if B.shape[1] == 0:
+        # nothing to residualize
+        return X
+    df_design = pd.concat([df_design, B], axis=1)
+    D = df_design.values  # n_samples x p
+    # ridge epsilon for stability
+    lam = 1e-6
+    DtD = D.T @ D + lam * np.eye(D.shape[1])
+    DtD_inv = np.linalg.pinv(DtD)
+    P = D @ DtD_inv @ D.T  # projection onto design
+    # Identify columns corresponding to batch
+    batch_cols = [i for i, c in enumerate(df_design.columns) if c.startswith("batch::")]
+    # Build a projection that removes ONLY batch components:
+    # y_hat = D beta; beta = (D'D)^-1 D'y ; we want to zero batch rows in beta before reconstruct
+    # Implement by constructing S that zeros batch coefs: S = I with zeros at batch rows
+    S = np.eye(D.shape[1])
+    for idx in batch_cols:
+        S[idx, idx] = 0.0
+    # corrected = D @ S @ beta = D @ S @ (D'D)^-1 D' y
+    M = D @ (S @ DtD_inv) @ D.T  # n x n
+    Y = X.values  # genes x samples
+    Yc = (M @ Y.T).T          # genes x samples
+    Xc = pd.DataFrame(Yc, index=X.index, columns=X.columns)
+    Xc = Xc.replace([np.inf, -np.inf], np.nan).apply(lambda r: r.fillna(r.mean()), axis=1).fillna(0.0)
+    return Xc
+
 def _fallback_center(expr_imputed: pd.DataFrame, meta_batch: pd.Series) -> pd.DataFrame:
     X = expr_imputed.copy()
     grand_mean = X.values.mean(); grand_std  = X.values.std()
@@ -320,23 +374,6 @@ def _fallback_center(expr_imputed: pd.DataFrame, meta_batch: pd.Series) -> pd.Da
         gmean = X[cols].values.mean(); gstd  = X[cols].values.std()
         X[cols] = (X[cols] - gmean) * (grand_std / (gstd if gstd>0 else 1)) + grand_mean
     return X
-
-def smart_batch_collapse(meta: pd.DataFrame, min_size: int) -> pd.Series:
-    meta = meta.copy()
-    if "batch" not in meta.columns:
-        return pd.Series("B0", index=meta.index, name="batch_collapsed")
-    b = meta["batch"].astype(str)
-    g = meta["group"].astype(str) if "group" in meta.columns else pd.Series("ALL", index=meta.index)
-    counts = b.value_counts()
-    large = counts[counts >= min_size].index
-    small = counts[counts < min_size].index
-    mapping = {k: k for k in large}
-    for batch in small:
-        idx = b.index[b == batch]
-        grp_series = g.loc[idx] if len(idx) else pd.Series(dtype=str)
-        main_group = (grp_series.value_counts().idxmax() if len(grp_series) else "mixed")
-        mapping[batch] = f"small_{main_group}"
-    return b.map(mapping).rename("batch_collapsed")
 
 # ---------------- Figures & analytics ----------------
 def _savefig(path: str):
@@ -426,7 +463,7 @@ def create_basic_qc_figures(expr_log2, expr_z, expr_harmonized, meta, figdir: st
         p = os.path.join(figdir, "sample_correlation_heatmap.png"); _savefig(p); paths.append(p)
     return paths
 
-def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization_mode):
+def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization_mode, embed_note: str | None = None):
     meta = meta.copy()
     if "group" not in meta.columns: meta["group"] = "ALL"
     meta["group"] = meta["group"].apply(normalize_group_value)
@@ -436,6 +473,8 @@ def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization
     pca_df["group"] = pca_df["group"].fillna("ALL").apply(normalize_group_value)
     groups = list(pd.unique(pca_df["group"].astype(str)))
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+    extra = f" | Embedding: {embed_note}" if embed_note else ""
 
     ax1 = axes[0,0]
     for g in groups:
@@ -456,7 +495,7 @@ def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization
                 pass
     ax1.set_xlabel(f"PC1 ({pca_model.explained_variance_ratio_[0]*100:.1f}%)")
     ax1.set_ylabel(f"PC2 ({pca_model.explained_variance_ratio_[1]*100:.1f}%)")
-    ax1.set_title(f"PCA: Biological Groups\n({harmonization_mode} harmonization)")
+    ax1.set_title(f"PCA: Biological Groups\n({harmonization_mode}{extra})")
     ax1.legend(); ax1.grid(True, alpha=0.3)
 
     ax2 = axes[0,1]
@@ -502,7 +541,7 @@ def create_enhanced_pca_plots(pca_df, pca_model, meta, output_dir, harmonization
                         label=f"{g} (n={len(sub)})")
     plt.xlabel(f"PC1 ({pca_model.explained_variance_ratio_[0]*100:.1f}%)")
     plt.ylabel(f"PC2 ({pca_model.explained_variance_ratio_[1]*100:.1f}%)")
-    plt.title(f"PCA: Sample Groups\n({harmonization_mode} harmonization)")
+    plt.title(f"PCA: Sample Groups\n({harmonization_mode}{extra})")
     plt.legend(fontsize=11); plt.grid(True, alpha=0.3); plt.tight_layout()
     _savefig(os.path.join(output_dir, "pca_clean_groups.png"))
 
@@ -516,6 +555,42 @@ def pca_loadings_plots(pca_model: PCA, expr_harmonized: pd.DataFrame, figdir: st
         plt.xticks(range(topn), [genes[j] for j in idx], rotation=60, ha="right", fontsize=8)
         plt.title(f"Top {topn} Loadings: PC{i+1}")
         _savefig(os.path.join(figdir, f"pca_loadings_pc{i+1}.png"))
+
+def _apply_harmony_or_mnn(X_for_embed: pd.DataFrame, meta: pd.DataFrame) -> tuple[pd.DataFrame, str | None]:
+    """
+    Optionally apply Harmony or MNN on PCA embedding input to improve visualization alignment.
+    Returns (embedding_matrix, note_string) or (None, None) if unchanged.
+    """
+    # X_for_embed: samples x features (e.g., PCs)
+    if X_for_embed is None or X_for_embed.shape[0] < 3:
+        return None, None
+    batch = meta.get("batch_collapsed", meta.get("batch", pd.Series("B0", index=X_for_embed.index))).astype(str)
+    if _HAVE_HARMONY:
+        try:
+            ho = hm.run_harmony(X_for_embed.values, batch.values, max_iter_harmony=10)
+            Z = pd.DataFrame(ho.Z_corr.T, index=X_for_embed.index, columns=[f"PC{i+1}" for i in range(ho.Z_corr.shape[0])])
+            return Z, "Harmony"
+        except Exception:
+            pass
+    if _HAVE_MNNPY:
+        try:
+            # mnnpy expects list of arrays per batch
+            batches = []
+            order = []
+            for b in pd.unique(batch):
+                idx = X_for_embed.index[batch == b]
+                batches.append(X_for_embed.loc[idx].values)
+                order.extend(list(idx))
+            al = mnnpy.mnn_correct(*batches, index_unique=None)
+            # al[0] is corrected list; we reassemble to original order
+            corrected = np.vstack([a for a in al[0]])
+            Z = pd.DataFrame(corrected, index=pd.Index(order, name=X_for_embed.index.name))
+            Z = Z.loc[X_for_embed.index]  # reorder
+            Z.columns = [f"PC{i+1}" for i in range(Z.shape[1])]
+            return Z, "MNN"
+        except Exception:
+            pass
+    return None, None
 
 def nonlinear_embedding_plots(Xc, meta, figdir, harmonization_mode, make=True):
     if not make: return
@@ -774,7 +849,7 @@ def run_pipeline(
     topk = min(pca_topk_features, len(pos)) if len(pos) > 0 else 0
     expr_filtered = expr_imputed.loc[pos.nlargest(topk).index] if topk > 0 else expr_imputed.iloc[0:0]
 
-    # 6) harmonize (ComBat or fallback) — GUARDED against singleton batches
+    # 6) harmonize (expression level): ComBat -> OLS residualization -> center fallback
     meta["batch_collapsed"] = smart_batch_collapse(meta, min_batch_size_for_combat)
     if meta.index.duplicated().any():
         meta = _collapse_dupes_df_by_index(meta, how_num="median", keep="first")
@@ -791,23 +866,31 @@ def run_pipeline(
         and expr_filtered.shape[1] > 1
     )
 
+    harmonization_mode = "fallback_center"
+    expr_harmonized = None
+
     if use_combat:
         x_combat = _combat(expr_filtered, meta_batch)
-        expr_harmonized = x_combat if x_combat is not None else _fallback_center(expr_filtered, meta_batch)
-        mode = "ComBat" if x_combat is not None else "fallback_center"
-    else:
-        expr_harmonized = _fallback_center(expr_filtered, meta_batch)
-        mode = "fallback_center"
+        if x_combat is not None:
+            expr_harmonized = x_combat
+            harmonization_mode = "ComBat"
+    if expr_harmonized is None:
+        try:
+            expr_harmonized = _ols_residualize_by_batch(expr_filtered, meta, keep_group=True)
+            harmonization_mode = "OLS_residualization (group-preserving)"
+        except Exception:
+            expr_harmonized = _fallback_center(expr_filtered, meta_batch)
+            harmonization_mode = "fallback_center"
 
-    # 7) PCA (fail-soft with fallback to pre-harmonized features)
+    # 7) PCA (+ optional embedding alignment for visualization)
     pca_df = pd.DataFrame(index=expr_harmonized.columns); kpi = {}; pca_skipped_reason = None
-    pca_origin = "harmonized"
+    embedding_note = None
     try:
         Xc = safe_matrix_for_pca(zscore_rows(expr_harmonized), topk=topk)
     except Exception as e1:
         try:
             Xc = safe_matrix_for_pca(zscore_rows(expr_filtered), topk=topk)
-            pca_origin = "pre-harmonization"
+            harmonization_mode += " (fallback: pre-harmonization PCA input)"
         except Exception as e2:
             pca_skipped_reason = f"Harmonized PCA failed ({type(e1).__name__}: {e1}); fallback PCA failed ({type(e2).__name__}: {e2})"
             Xc = None
@@ -817,10 +900,19 @@ def run_pipeline(
             if Xc.shape[0] < 2 or Xc.shape[1] < 2: raise RuntimeError("Too few samples or features for PCA.")
             pca = PCA(n_components=min(6, Xc.shape[1]), random_state=42).fit(Xc)
             Xp = pca.transform(Xc)
+            # Optional: Harmony or MNN on the PCA space for visualization only
+            Xp_df = pd.DataFrame(Xp, index=Xc.index, columns=[f"PC{i+1}" for i in range(Xp.shape[1])])
+            Xp_adj, embedding_note = _apply_harmony_or_mnn(Xp_df, meta.reindex(Xc.index))
+            if Xp_adj is not None and set(Xp_df.columns).issubset(set(Xp_adj.columns)):
+                Xp_use = Xp_adj[Xp_df.columns]
+            else:
+                Xp_use = Xp_df
+
             cols_to_join = [c for c in ["group","batch","batch_collapsed"] if c in meta.columns]
-            pca_df = (pd.DataFrame(Xp[:, :min(6, Xp.shape[1])],
-                                   columns=[f"PC{i+1}" for i in range(min(6, Xp.shape[1]))],
-                                   index=Xc.index).join(meta[cols_to_join], how="left"))
+            pca_df = (Xp_use.iloc[:, :min(6, Xp_use.shape[1])].copy())
+            pca_df.index = Xc.index
+            pca_df.columns = [f"PC{i+1}" for i in range(pca_df.shape[1])]
+            pca_df = pca_df.join(meta[cols_to_join], how="left")
             if "group" not in pca_df.columns: pca_df["group"] = "ALL"
             meta["group"] = meta["group"].apply(normalize_group_value)
             pca_df["group"] = pca_df["group"].fillna("ALL").apply(normalize_group_value)
@@ -834,10 +926,11 @@ def run_pipeline(
                         kpi["silhouette_group"] = float(silhouette_score(Xs, meta["group"].astype(str)))
             except Exception:
                 pass
-            label_mode = mode if pca_origin == "harmonized" else f"{mode} (fallback: pre-harmonization)"
-            create_enhanced_pca_plots(pca_df, pca, meta, os.path.join(OUTDIR, "figs"), label_mode)
-            pca_loadings_plots(pca, expr_harmonized if pca_origin=="harmonized" else expr_filtered, os.path.join(OUTDIR, "figs"))
-            nonlinear_embedding_plots(Xc, meta, os.path.join(OUTDIR, "figs"), label_mode, make=True)
+            create_enhanced_pca_plots(pca_df, pca, meta, os.path.join(OUTDIR, "figs"),
+                                      harmonization_mode, embed_note=embedding_note)
+            pca_loadings_plots(pca, expr_harmonized, os.path.join(OUTDIR, "figs"))
+            nonlinear_embedding_plots(Xc, meta, os.path.join(OUTDIR, "figs"),
+                                      harmonization_mode + (f" + {embedding_note}" if embedding_note else ""), make=True)
         except Exception as e:
             pca_skipped_reason = f"{type(e).__name__}: {e}"
 
@@ -863,8 +956,24 @@ def run_pipeline(
         volcano_and_ma_plots(df, k, os.path.join(OUTDIR, "figs"))
         heatmap_top_de(expr_log2, meta, df, k, os.path.join(OUTDIR, "figs"), topn=50)
 
-    # 11) GSEA (optional) — stub
-    gsea_dir = os.path.join(OUTDIR, "gsea"); os.makedirs(gsea_dir, exist_ok=True)
+    # 11) (Optional) quick pathway touch using gseapy if provided a GMT
+    if gsea_gmt and _HAVE_GSEAPY:
+        try:
+            gsea_dir = os.path.join(OUTDIR, "gsea"); os.makedirs(gsea_dir, exist_ok=True)
+            # Use top up genes from Disease_vs_Control if present
+            target = os.path.join(de_dir, "DE_Disease_vs_Control.tsv")
+            if os.path.exists(target):
+                df = pd.read_csv(target, sep="\t", index_col=0)
+                up = df.sort_values(["qval","log2FC"]).query("log2FC>0").head(150).index.tolist()
+                dn = df.sort_values(["qval","log2FC"]).query("log2FC<0").head(150).index.tolist()
+                for label, genes in [("UP", up), ("DOWN", dn)]:
+                    if genes:
+                        enr = gp.enrichr(gene_list=genes, gene_sets=gsea_gmt, cutoff=0.5, no_plot=True)
+                        enr.results.to_csv(os.path.join(gsea_dir, f"enrichr_{label}.tsv"), sep="\t", index=False)
+        except Exception:
+            pass
+    else:
+        gsea_dir = os.path.join(OUTDIR, "gsea"); os.makedirs(gsea_dir, exist_ok=True)
 
     # 12) Save outputs + richer report
     expr_harmonized.to_csv(os.path.join(OUTDIR, "expression_harmonized.tsv"), sep="\t")
@@ -875,7 +984,7 @@ def run_pipeline(
     rep = {
         "qc": {"zero_fraction": float(diags.get("zero_fraction", np.nan)),
                "value_range_approx": float(diags.get("value_range_approx", np.nan)),
-               "harmonization_mode": mode,
+               "harmonization_mode": harmonization_mode + (f" + embedding:{embedding_note}" if embedding_note else ""),
                "platform": platform,
                "genes_zero_std_after_harmonization": genes_zero_std_after,
                **kpi},
@@ -990,7 +1099,7 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
         "📊 STATISTICAL RESULTS:",
         f"   • Significant genes (FDR < {fdr_thresh}): {sig:,}",
         f"   • Consistently upregulated genes: {up_consistent:,}",
-        f"   • Meta-analysis method: Signed Stouffer Z (gene-level)",
+        "   • Meta-analysis method: Signed Stouffer Z (gene-level)",
         "",
         "🧬 TOP BIOMARKER CANDIDATES:",
     ]
@@ -1004,8 +1113,9 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
     text_lines += [
         "",
         "🔬 HARMONIZATION STRATEGY:",
+        "   ✓ ComBat when feasible, else OLS residualization (group-preserving) — expression-level",
+        "   ✓ Optional Harmony/MNN alignment on PCA space — visualization-level",
         "   ✓ Individual dataset analysis followed by meta-analysis",
-        "   ✓ Gene-level aggregation for cross-platform compatibility",
         "   ✓ Consistency filtering (same direction across datasets)",
         f"   ✓ Robust statistical thresholds (FDR < {fdr_thresh})",
         "",
@@ -1029,7 +1139,7 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
         "   4. Develop diagnostic/prognostic assays",
         "",
         "🏁 HARMONIZATION ANALYSIS COMPLETE",
-        "   Approach: Biologically sound meta-analysis",
+        "   Approach: Modern batch correction + meta-analysis",
         "   Result: High-confidence biomarkers identified."
     ]
     summary_txt = os.path.join(meta_dir, "final_analysis_summary.txt")
