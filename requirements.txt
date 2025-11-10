@@ -1,4 +1,5 @@
 streamlit
+gdown
 pandas
 numpy
 matplotlib
@@ -10,3 +11,4 @@ umap-learn
 anndata
 scanpy
 gseapy
+
