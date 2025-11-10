@@ -467,20 +467,26 @@ st.subheader("Results")
 def _run_out_dict(run_dict_or_path):
     return run_dict_or_path
 
-# NEW: selector for multi runs (view combined OR per-dataset)
+# --- replace the “NEW: selector for multi runs …” block with this ---
+
 multi_ctx = st.session_state.get("multi")
-view_selector = None
-selected_key = None
 if multi_ctx and isinstance(multi_ctx, dict) and multi_ctx.get("runs"):
     run_keys = list(multi_ctx["runs"].keys())
-    options = ["[Combined]"] if multi_ctx.get("combined") else []
-    options += run_keys
-    st.info("Multi-dataset results detected. You can inspect **combined** results or any **individual dataset**.")
-    selected_key = st.selectbox("View which results?", options, index=0)
+    # Sidebar selector (more prominent)
+    st.sidebar.markdown("### 📂 Dataset view")
+    selector_options = (["[Combined]"] if multi_ctx.get("combined") else []) + run_keys
+    selected_key = st.sidebar.selectbox("Select dataset", selector_options, index=0)
     if selected_key == "[Combined]":
         out_curr = multi_ctx.get("combined") or st.session_state.get("out")
     else:
         out_curr = multi_ctx["runs"][selected_key]
+
+    # Quick shortcuts (shows even if you’re on another tab)
+    with st.sidebar.expander("Per-dataset quick links", expanded=False):
+        for name in run_keys:
+            outdir = multi_ctx["runs"][name]["outdir"]
+            st.write(f"• **{name}**")
+            st.caption(outdir)
 else:
     out_curr = st.session_state.get("out")
 
@@ -847,3 +853,4 @@ with tabs[8]:
 
         st.caption("Tip: Higher intersections and Jaccard suggest stronger similarity across datasets. "
                    "Meta-analysis above already aggregates signals from all datasets.")
+
