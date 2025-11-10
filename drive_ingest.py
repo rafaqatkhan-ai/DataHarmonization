@@ -1,350 +1,199 @@
 # drive_ingest.py
-# Discover nested `prep/` folders in Google Drive under a deg_data root,
-# optionally filtered by disease keyword(s), and download counts + metadata.
+# Robust recursive Drive crawler that finds *all* prep folders and pairs counts+meta in each.
 
 import io
+import os
 import re
-import time
-import json
-from typing import Dict, List, Tuple, Optional, Iterable
+import zipfile
 from dataclasses import dataclass
+from typing import List, Dict, Optional, Tuple
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-FOLDER_MIME = "application/vnd.google-apps.folder"
-VALID_DATA_EXT = (".csv", ".tsv", ".txt", ".xlsx", ".xls")
-COUNT_HINTS = ("count", "counts", "expr", "expression", "matrix")
-META_HINTS = ("meta", "metadata", "pheno", "clinical", "sample", "phenotype")
+# ---------- Configuration ----------
+SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
+# File name heuristics
+COUNT_HINTS = [
+    r"^counts?\b", r"\bcount(s)?\b", r"\bexpr(ession)?\b", r"\bmatrix\b", r"\bprep[_-]?count\b"
+]
+META_HINTS = [
+    r"\bmeta(data)?\b", r"\bpheno(type)?\b", r"\bsample(s)?\b", r"\bannotation\b", r"\bprep[_-]?meta\b"
+]
 
-def parse_folder_id(url_or_id: str) -> str:
-    s = url_or_id.strip()
-    if re.fullmatch(r"[A-Za-z0-9_\-]{20,}", s):  # looks like a raw id
-        return s
-    m = re.search(r"/folders/([A-Za-z0-9_\-]+)", s)
-    if m: return m.group(1)
-    m = re.search(r"[?&]id=([A-Za-z0-9_\-]+)", s)
-    if m: return m.group(1)
-    raise ValueError("Could not parse a Drive folder ID from the provided link.")
-
-
-def _is_data_file(name: str) -> bool:
-    nm = name.lower()
-    return nm.endswith(VALID_DATA_EXT)
-
-
-def _looks_like_counts(name: str) -> bool:
-    nm = name.lower()
-    return any(h in nm for h in COUNT_HINTS) and _is_data_file(name)
-
-
-def _looks_like_meta(name: str) -> bool:
-    nm = name.lower()
-    return any(h in nm for h in META_HINTS) and _is_data_file(name)
-
-
-def _norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
-
-
-def _any_token_matches(name: str, tokens: Iterable[str]) -> bool:
-    n = _norm(name)
-    return any(tok and tok in n for tok in tokens)
-
+# Extensions we accept
+TXT_EXT = (".tsv", ".csv", ".txt", ".xlsx", ".xls")
 
 @dataclass
 class DriveFile:
     id: str
     name: str
-    mimeType: str
-    parents: List[str]
-    path_hint: str = ""
-
+    mime: str
+    parent: Optional[str]
 
 @dataclass
-class PrepBundle:
-    disease: str
-    path: str
-    prep_folder_id: str
-    counts: List[DriveFile]
-    metas: List[DriveFile]
+class DatasetHit:
+    label: str            # human readable, unique
+    disease: str          # top-level disease folder name
+    prep_path: str        # relative path from disease folder to prep folder
+    counts_id: str
+    counts_name: str
+    meta_id: str
+    meta_name: str
 
 
 class DriveClient:
-    """Thin wrapper over Google Drive API v3."""
-
-    def __init__(self, creds: Credentials):
-        self.creds = creds
+    def __init__(self, service_account_json_path: str):
+        creds = Credentials.from_service_account_file(service_account_json_path, scopes=SCOPES)
         self.svc = build("drive", "v3", credentials=creds, cache_discovery=False)
 
-    @classmethod
-    def from_service_account_bytes(cls, json_bytes: bytes, scopes: Optional[List[str]] = None):
-        scopes = scopes or ["https://www.googleapis.com/auth/drive.readonly"]
-        info = json.loads(json_bytes.decode("utf-8"))
-        creds = Credentials.from_service_account_info(info=info, scopes=scopes)
-        return cls(creds)
-
-    # ------------------ Drive queries ------------------
-
-    def get_children(self, folder_id: str) -> List[DriveFile]:
+    # ------------ basic helpers ------------
+    def _list_children(self, folder_id: str) -> List[DriveFile]:
         q = f"'{folder_id}' in parents and trashed=false"
-        fields = "nextPageToken, files(id, name, mimeType, parents)"
-        out: List[DriveFile] = []
-        page_token = None
+        files, page_token = [], None
         while True:
-            resp = self.svc.files().list(q=q, fields=fields, pageToken=page_token).execute()
+            resp = self.svc.files().list(
+                q=q,
+                fields="nextPageToken, files(id, name, mimeType, parents)",
+                pageToken=page_token
+            ).execute()
             for f in resp.get("files", []):
-                out.append(DriveFile(
-                    id=f["id"],
-                    name=f["name"],
-                    mimeType=f["mimeType"],
-                    parents=f.get("parents", []),
-                ))
+                files.append(DriveFile(id=f["id"], name=f["name"], mime=f["mimeType"], parent=f.get("parents", [None])[0]))
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
-        return out
+        return files
 
-    def get_file_path_chain(self, file_or_folder_id: str, stop_id: Optional[str] = None) -> List[DriveFile]:
-        fields = "id, name, mimeType, parents"
-        chain: List[DriveFile] = []
-        cur = file_or_folder_id
-        seen = set()
-        while cur and cur not in seen:
-            seen.add(cur)
-            f = self.svc.files().get(fileId=cur, fields=fields).execute()
-            df = DriveFile(
-                id=f["id"],
-                name=f["name"],
-                mimeType=f["mimeType"],
-                parents=f.get("parents", []),
-            )
-            chain.append(df)
-            if stop_id and df.id == stop_id:
-                break
-            if df.parents:
-                cur = df.parents[0]
-            else:
-                break
-        chain.reverse()
-        return chain
+    def _is_folder(self, mime: str) -> bool:
+        return mime == "application/vnd.google-apps.folder"
 
-    def download_file(self, file_id: str) -> Tuple[bytes, str]:
-        meta = self.svc.files().get(fileId=file_id, fields="id,name").execute()
-        name = meta.get("name", "file.bin")
+    def _download(self, file_id: str) -> bytes:
         req = self.svc.files().get_media(fileId=file_id)
         buf = io.BytesIO()
-        downloader = MediaIoBaseDownload(buf, req, chunksize=1 << 20)
+        downloader = MediaIoBaseDownload(buf, req)
         done = False
-        backoff = 1.0
         while not done:
-            try:
-                _, done = downloader.next_chunk()
-            except Exception:
-                time.sleep(backoff)
-                backoff = min(10.0, backoff * 1.8)
+            _, done = downloader.next_chunk()
         buf.seek(0)
-        return buf.read(), name
+        return buf.read()
 
-    # ------------------ Discovery ------------------
+    # ------------ search utilities ------------
+    @staticmethod
+    def _match_any(name: str, patterns: List[str]) -> bool:
+        s = name.lower()
+        for pat in patterns:
+            if re.search(pat, s):
+                return True
+        return False
 
-    def list_disease_folders(self, root_folder_id: str) -> List[DriveFile]:
-        """Return folders directly under root (deg_data)."""
-        return [c for c in self.get_children(root_folder_id) if c.mimeType == FOLDER_MIME]
+    @staticmethod
+    def _uniqify(base: str, seen: Dict[str, int]) -> str:
+        if base not in seen:
+            seen[base] = 1
+            return base
+        seen[base] += 1
+        return f"{base} (#{seen[base]})"
 
-    def list_disease_folders_matching(self, root_folder_id: str, disease_query: Optional[str]) -> List[DriveFile]:
-        all_folders = self.list_disease_folders(root_folder_id)
-        if not disease_query:
-            return all_folders
-        tokens = [_norm(t) for t in re.split(r"[,\s]+", disease_query) if t.strip()]
-        if not tokens:
-            return all_folders
-        return [d for d in all_folders if _any_token_matches(d.name, tokens)]
-
-    def find_all_prep_folders(self, root_folder_id: str, disease_query: Optional[str] = None) -> List[PrepBundle]:
+    # ------------ core: recursive harvest ------------
+    def harvest_datasets(
+        self,
+        deg_root_id: str,
+        disease_query: Optional[str] = None,
+    ) -> List[DatasetHit]:
         """
-        BFS through nested folders:
-        deg_data / <disease (filtered by query)> / ... / prep / {counts/meta files}
-        Returns a list of PrepBundle with discovered files.
+        deg_root_id: ID of the 'deg_data' folder
+        disease_query: user input like 'acute' or 'myeloid' (matches substrings, case-insensitive)
         """
-        results: List[PrepBundle] = []
+        hits: List[DatasetHit] = []
+        label_seen: Dict[str, int] = {}
 
-        disease_folders = self.list_disease_folders_matching(root_folder_id, disease_query)
+        # 1) list disease folders under root
+        disease_folders = [f for f in self._list_children(deg_root_id) if self._is_folder(f.mime)]
+        if disease_query:
+            q = disease_query.lower().strip()
+            disease_folders = [f for f in disease_folders if q in f.name.lower()]
 
         for disease in disease_folders:
-            disease_name = disease.name
-            queue = [disease]
-            visited = set()
-            while queue:
-                cur = queue.pop(0)
-                if cur.id in visited:
-                    continue
-                visited.add(cur.id)
-                kids = self.get_children(cur.id)
-                for k in kids:
-                    if k.mimeType == FOLDER_MIME:
-                        if k.name.strip().lower() == "prep":
-                            prep_files = self.get_children(k.id)
-                            counts = [f for f in prep_files if _looks_like_counts(f.name)]
-                            metas = [f for f in prep_files if _looks_like_meta(f.name)]
-                            chain = self.get_file_path_chain(k.id, stop_id=root_folder_id)
-                            path_hint = "/".join([x.name for x in chain])
-                            for f in counts + metas:
-                                f.path_hint = path_hint
-                            results.append(PrepBundle(
-                                disease=disease_name,
-                                path=path_hint,
-                                prep_folder_id=k.id,
-                                counts=counts,
-                                metas=metas
-                            ))
+            # 2) recursively find all 'prep' folders under this disease
+            stack: List[Tuple[DriveFile, str]] = [(disease, "")]  # (folder, relpath)
+            prep_folders: List[Tuple[DriveFile, str]] = []
+
+            while stack:
+                folder, rel = stack.pop()
+                children = self._list_children(folder.id)
+                for ch in children:
+                    if self._is_folder(ch.mime):
+                        rel2 = os.path.join(rel, ch.name)
+                        # treat any folder whose name *contains* 'prep' as a prep folder
+                        if "prep" in ch.name.lower():
+                            prep_folders.append((ch, rel2))
+                        # keep traversing (so we can find lower-level prep as well)
+                        stack.append((ch, rel2))
+
+            # 3) inside each prep folder, find counts + meta files by heuristic
+            for prep, relpath in prep_folders:
+                children = self._list_children(prep.id)
+                # candidate tables
+                count_candidates = [f for f in children if not self._is_folder(f.mime) and f.name.lower().endswith(TXT_EXT) and self._match_any(f.name, COUNT_HINTS)]
+                meta_candidates  = [f for f in children if not self._is_folder(f.mime) and f.name.lower().endswith(TXT_EXT) and self._match_any(f.name, META_HINTS)]
+
+                # also accept generic names when folder is clearly 'prep'
+                if not count_candidates:
+                    count_candidates = [f for f in children if not self._is_folder(f.mime) and f.name.lower().endswith(TXT_EXT) and re.search(r"(count|expr|matrix|table|gene)", f.name.lower())]
+                if not meta_candidates:
+                    meta_candidates = [f for f in children if not self._is_folder(f.mime) and f.name.lower().endswith(TXT_EXT) and re.search(r"(meta|pheno|sample|annot|group)", f.name.lower())]
+
+                if not count_candidates:
+                    # Try one level deeper (some people put files in a nested folder under 'prep')
+                    for ch in children:
+                        if self._is_folder(ch.mime):
+                            grand = self._list_children(ch.id)
+                            count_candidates.extend([f for f in grand if not self._is_folder(f.mime) and f.name.lower().endswith(TXT_EXT) and self._match_any(f.name, COUNT_HINTS)])
+                            meta_candidates.extend([f for f in grand if not self._is_folder(f.mime) and f.name.lower().endswith(TXT_EXT) and self._match_any(f.name, META_HINTS)])
+
+                # Pair up files. If multiple, we try to pair by simple same prefix; else produce all combos.
+                pairs: List[Tuple[DriveFile, DriveFile]] = []
+                if count_candidates and meta_candidates:
+                    # prefix map
+                    def base(s: str) -> str:
+                        s = os.path.splitext(s)[0]
+                        s = re.sub(r"(?i)(counts?|meta(data)?)", "", s)
+                        return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+                    m_by_prefix: Dict[str, List[DriveFile]] = {}
+                    for m in meta_candidates:
+                        m_by_prefix.setdefault(base(m.name), []).append(m)
+
+                    for c in count_candidates:
+                        pref = base(c.name)
+                        if pref in m_by_prefix and m_by_prefix[pref]:
+                            pairs.append((c, m_by_prefix[pref].pop(0)))
                         else:
-                            queue.append(k)
-        return results
+                            # fallback: pair with first meta
+                            pairs.append((c, meta_candidates[0]))
+                # if only counts OR only meta, skip (we need both)
+                if not pairs:
+                    continue
 
+                for cfile, mfile in pairs:
+                    # build unique label like: allergic_disease :: df62cf82/.../prep
+                    short_rel = relpath.replace("\\", "/").strip("/")
+                    base_label = f"{disease.name} :: {short_rel or prep.name}"
+                    label = self._uniqify(base_label, label_seen)
 
-# ------------------ Planning logic ------------------
+                    hits.append(DatasetHit(
+                        label=label,
+                        disease=disease.name,
+                        prep_path=short_rel or prep.name,
+                        counts_id=cfile.id, counts_name=cfile.name,
+                        meta_id=mfile.id,   meta_name=mfile.name
+                    ))
 
-def make_ingest_plan(
-    drive: DriveClient,
-    root_url_or_id: str,
-    disease_query: Optional[str] = None
-) -> Dict:
-    """
-    Build a plan describing how to run from deg_data:
-      - Filter disease folders by keyword (e.g., "acute", "myeloid", "lukemia").
-      - 'single'                    → one prep with 1 counts & 1 meta
-      - 'multi_files_one_meta'     → one prep with >=2 counts and exactly 1 meta
-      - 'multi_dataset'            → >=2 preps, each with their own counts+meta
-    """
-    root_id = parse_folder_id(root_url_or_id)
-    preps = drive.find_all_prep_folders(root_id, disease_query=disease_query)
+        return hits
 
-    if not preps:
-        return {"mode": "none", "reason": "No prep folders found for the given disease query.", "preps": []}
-
-    usable = [p for p in preps if len(p.counts) > 0]
-    if not usable:
-        return {"mode": "none", "reason": "No counts files detected in any prep folder.", "preps": []}
-
-    # If multiple prep folders -> treat as multi-dataset (require each to have a meta)
-    if len(usable) >= 2:
-        datasets = []
-        for p in usable:
-            # choose best meta
-            meta_file = None
-            if p.metas:
-                def _score_meta(df: DriveFile):
-                    nm = df.name.lower()
-                    hits = sum(int(h in nm) for h in META_HINTS)
-                    return (-hits, len(nm))
-                meta_file = sorted(p.metas, key=_score_meta)[0]
-            if not meta_file:
-                # skip preps without metadata in multi-dataset mode
-                continue
-
-            # choose best counts (prioritize TSV/TXT over CSV, then XLSX)
-            def _score_counts(df: DriveFile):
-                nm = df.name.lower()
-                hits = sum(int(h in nm) for h in COUNT_HINTS)
-                ext_rank = 0 if nm.endswith((".tsv", ".txt")) else (1 if nm.endswith(".csv") else 2)
-                return (-hits, ext_rank, len(nm))
-            best_counts = sorted(p.counts, key=_score_counts)[0]
-
-            c_bytes, c_name = drive.download_file(best_counts.id)
-            m_bytes, m_name = drive.download_file(meta_file.id)
-
-            # label includes disease + the parent of prep (often a UUID-ish)
-            tail = p.path.split("/")[-2] if "/" in p.path else p.path
-            label = f"{p.disease} :: {tail}/prep"
-
-            datasets.append({
-                "label": label,
-                "disease": p.disease,
-                "counts": io.BytesIO(c_bytes),
-                "counts_name": c_name,
-                "meta": io.BytesIO(m_bytes),
-                "meta_name": m_name,
-                "path": p.path,
-            })
-
-        if len(datasets) >= 2:
-            return {"mode": "multi_dataset", "datasets": datasets, "preps_found": len(usable)}
-
-        if len(datasets) == 1:
-            single = datasets[0]
-            return {
-                "mode": "single",
-                "single": {
-                    "counts": single["counts"],
-                    "counts_name": single["counts_name"],
-                    "meta": single["meta"],
-                    "meta_name": single["meta_name"],
-                    "label": single["label"],
-                },
-                "preps_found": len(usable),
-            }
-
-    # Exactly one usable prep
-    p = usable[0]
-
-    # One meta + multiple counts → multi-files-one-meta
-    if len(p.metas) >= 1 and len(p.counts) >= 2:
-        def _score_meta(df: DriveFile):
-            nm = df.name.lower()
-            hits = sum(int(h in nm) for h in META_HINTS)
-            return (-hits, len(nm))
-        meta_file = sorted(p.metas, key=_score_meta)[0]
-        m_bytes, m_name = drive.download_file(meta_file.id)
-
-        groups: Dict[str, Tuple[io.BytesIO, str]] = {}
-        for i, cf in enumerate(p.counts, 1):
-            c_bytes, c_name = drive.download_file(cf.id)
-            base = re.sub(r"\.[^.]+$", "", cf.name)
-            # keep short-ish label; otherwise fallback
-            label = base if len(base) <= 40 else f"Group_{i}"
-            groups[label] = (io.BytesIO(c_bytes), c_name)
-
-        return {
-            "mode": "multi_files_one_meta",
-            "meta": io.BytesIO(m_bytes),
-            "meta_name": m_name,
-            "groups": groups,
-            "prep_path": p.path,
-            "disease": p.disease,
-        }
-
-    # One counts + one meta → single
-    if len(p.counts) == 1 and len(p.metas) >= 1:
-        def _score_meta(df: DriveFile):
-            nm = df.name.lower()
-            hits = sum(int(h in nm) for h in META_HINTS)
-            return (-hits, len(nm))
-        meta_file = sorted(p.metas, key=_score_meta)[0]
-        best_counts = p.counts[0]
-        c_bytes, c_name = drive.download_file(best_counts.id)
-        m_bytes, m_name = drive.download_file(meta_file.id)
-        tail = p.path.split("/")[-2] if "/" in p.path else p.path
-        label = f"{p.disease} :: {tail}/prep"
-        return {
-            "mode": "single",
-            "single": {
-                "counts": io.BytesIO(c_bytes),
-                "counts_name": c_name,
-                "meta": io.BytesIO(m_bytes),
-                "meta_name": m_name,
-                "label": label,
-            },
-            "prep_path": p.path,
-            "disease": p.disease,
-        }
-
-    # Ambiguous contents
-    return {
-        "mode": "none",
-        "reason": f"Ambiguous contents in prep folder: counts={len(p.counts)}, metas={len(p.metas)}",
-        "prep_path": p.path,
-        "disease": p.disease,
-    }
+    # ----------------- materialization helpers -----------------
+    def download_tsv_like(self, file_id: str) -> bytes:
+        # Just returns raw bytes (xlsx/csv/tsv/txt). The app will parse by extension.
+        return self._download(file_id)
