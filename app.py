@@ -1,239 +1,13 @@
-# app.py — supports multi-dataset mode + Presenter Mode (with robust PCA handling) + Google Drive auto-discovery
-import os, io, tempfile, shutil, json, re, sys, datetime as _dt
+# app.py — supports multi-dataset mode + Presenter Mode (with robust PCA handling) + Google Drive ingestion
+import os, io, tempfile, shutil, json
 import streamlit as st
 import pandas as pd
 import harmonizer as hz
+import datetime as _dt
 
-# =========================
-# Utilities: install/ensure gdown, Google Drive crawling
-# =========================
-def ensure_gdown():
-    try:
-        import gdown  # noqa: F401
-        return True
-    except Exception:
-        try:
-            import subprocess
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "gdown"])
-            import gdown  # noqa: F401
-            return True
-        except Exception as e:
-            st.error(f"Couldn't install gdown automatically: {e}")
-            return False
-
-def extract_drive_id(url_or_id: str) -> str:
-    """
-    Accepts a Google Drive folder URL or bare ID. Returns folder ID.
-    """
-    s = (url_or_id or "").strip()
-    if not s:
-        return ""
-    # If it's a full URL, try to parse the /folders/<ID> or ?id=<ID>
-    m = re.search(r"/folders/([a-zA-Z0-9_-]+)", s)
-    if m:
-        return m.group(1)
-    m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", s)
-    if m:
-        return m.group(1)
-    # Assume it's already an ID
-    return s
-
-def download_drive_folder_recursive(folder_id: str, out_dir: str) -> str:
-    """
-    Uses gdown to mirror a public Google Drive folder (recursively) to out_dir/drive_sync.
-    Returns the local root folder path.
-    """
-    ok = ensure_gdown()
-    if not ok:
-        raise RuntimeError("gdown unavailable. Cannot download from Google Drive.")
-    import gdown
-    target = os.path.join(out_dir, "drive_sync")
-    os.makedirs(target, exist_ok=True)
-    # gdown.download_folder returns a list (downloaded files), but we just ensure it runs.
-    gdown.download_folder(
-        id=folder_id,
-        output=target,
-        quiet=True,
-        use_cookies=False,
-        remaining_ok=True
-    )
-    return target
-
-# ------------ Discovery + classification ------------
-FILE_EXTS = (".xlsx", ".xls", ".csv", ".tsv", ".txt")
-META_HINTS = ("meta", "metadata", "sample", "samplesheet", "annotation")
-COUNT_HINTS = ("count", "counts", "expression", "expr", "matrix", "abundance")
-
-def is_metadata_filename(name: str) -> bool:
-    n = name.lower()
-    return any(h in n for h in META_HINTS) and n.endswith(FILE_EXTS)
-
-def is_counts_filename(name: str) -> bool:
-    n = name.lower()
-    return any(h in n for h in COUNT_HINTS) and n.endswith(FILE_EXTS)
-
-def is_table_ext(name: str) -> bool:
-    return name.lower().endswith(FILE_EXTS)
-
-def find_prep_dirs(root: str):
-    """
-    Walk the downloaded tree; yield every directory whose basename is 'prep' (case-insensitive).
-    """
-    out = []
-    for r, dirs, files in os.walk(root):
-        base = os.path.basename(r).strip().lower()
-        if base == "prep":
-            out.append(r)
-    return out
-
-def classify_prep_dir(prep_dir: str):
-    """
-    Return (counts_files, meta_files) lists of full paths inside this prep directory (non-recursive).
-    """
-    counts, metas = [], []
-    for f in os.listdir(prep_dir):
-        p = os.path.join(prep_dir, f)
-        if not os.path.isfile(p): 
-            continue
-        if not is_table_ext(f):
-            continue
-        if is_metadata_filename(f):
-            metas.append(p)
-        elif is_counts_filename(f):
-            counts.append(p)
-        else:
-            # If filename is not clear, lightly sample the file to guess:
-            # We'll be conservative—leave it unclassified unless it has 'gene-like' first column header after read head.
-            try:
-                if f.lower().endswith((".tsv", ".txt")):
-                    df = pd.read_csv(p, sep="\t", nrows=5)
-                elif f.lower().endswith(".csv"):
-                    df = pd.read_csv(p, sep=None, engine="python", nrows=5)
-                else:
-                    df = pd.read_excel(p, nrows=5, engine="openpyxl")
-                cols = [str(c).lower() for c in df.columns]
-                # Heuristic: metadata if few columns and contains "sample" / "id"; counts if many numeric columns
-                if any("sample" in c or "id" == c for c in cols) and len(cols) <= 30:
-                    metas.append(p)
-                else:
-                    counts.append(p)
-            except Exception:
-                # If unreadable, ignore
-                pass
-    return counts, metas
-
-def bytes_from_path(p: str) -> io.BytesIO:
-    """
-    Read a file path into BytesIO for harmonizer.
-    """
-    with open(p, "rb") as fh:
-        b = fh.read()
-    return io.BytesIO(b)
-
-def guess_group_name_from_path(p: str) -> str:
-    """
-    Use parent folder name or file stem as a friendly group name.
-    """
-    base = os.path.basename(p)
-    stem = os.path.splitext(base)[0]
-    parent = os.path.basename(os.path.dirname(p))
-    # Prefer parent folder (often group), fall back to stem.
-    name = parent or stem
-    # Clean
-    name = re.sub(r"[_\s]+", " ", name).strip()
-    return name
-
-def build_group_dict(count_paths: list) -> dict:
-    """
-    Map group -> BytesIO for group-mode. Make group names distinct & readable.
-    """
-    groups = {}
-    used = set()
-    for cp in count_paths:
-        g = guess_group_name_from_path(cp)
-        # Ensure uniqueness
-        k = g
-        i = 2
-        while k in used:
-            k = f"{g} {i}"
-            i += 1
-        used.add(k)
-        groups[k] = bytes_from_path(cp)
-    return groups
-
-def make_dataset_label_from_prep(prep_dir: str) -> str:
-    """
-    Try to make a dataset label using disease/subfolder path elements + prep parent.
-    """
-    parts = []
-    cur = os.path.dirname(prep_dir)  # parent of prep
-    for _ in range(3):
-        if not cur or cur == "/" or cur == os.path.dirname(cur):
-            break
-        parts.append(os.path.basename(cur))
-        cur = os.path.dirname(cur)
-    parts = list(reversed(parts))
-    label = " / ".join(parts[-2:] or ["DS"])
-    return label or "DS"
-
-def discover_tasks_from_drive(root_folder_local: str):
-    """
-    Returns a dict describing what we can run:
-      {
-        'mode': 'single' | 'group' | 'multi',
-        'single': { 'counts': path, 'meta': path } or None,
-        'group': { 'count_paths': [...], 'meta': path } or None,
-        'multi': [ {'label':..., 'counts': path, 'meta': path}, ... ] or []
-      }
-    Strategy:
-      - If multiple prep dirs each with exactly 1 counts + 1 meta -> multi-dataset mode.
-      - Else if any prep dir has >=2 counts + 1 meta -> group mode.
-      - Else if any prep dir has 1 counts + 1 meta -> single mode.
-    Priority: multi > group > single.
-    """
-    tasks = {"mode": None, "single": None, "group": None, "multi": []}
-    prep_dirs = find_prep_dirs(root_folder_local)
-
-    # Gather candidates
-    single_candidates = []
-    group_candidates = []
-    multi_candidates = []
-
-    for pdx in prep_dirs:
-        counts, metas = classify_prep_dir(pdx)
-        if len(metas) >= 1 and len(counts) == 1:
-            single_candidates.append((pdx, counts[0], metas[0]))
-            multi_candidates.append((pdx, counts[0], metas[0]))
-        elif len(metas) >= 1 and len(counts) >= 2:
-            group_candidates.append((pdx, counts, metas[0]))
-
-    # MULTI: if we have at least 2 prep dirs each with (1 count + 1 meta), we can do multi
-    if len(multi_candidates) >= 2:
-        for pdx, c, m in multi_candidates:
-            tasks["multi"].append({
-                "label": make_dataset_label_from_prep(pdx),
-                "counts": c, "meta": m
-            })
-        tasks["mode"] = "multi"
-        return tasks
-
-    # GROUP: if any prep has multiple count files + single meta
-    if len(group_candidates) >= 1:
-        pdx, counts, meta = group_candidates[0]  # take the first such prep
-        tasks["group"] = {"count_paths": counts, "meta": meta, "label": make_dataset_label_from_prep(pdx)}
-        tasks["mode"] = "group"
-        return tasks
-
-    # SINGLE: fallback to any single candidate
-    if len(single_candidates) >= 1:
-        pdx, c, m = single_candidates[0]
-        tasks["single"] = {"counts": c, "meta": m, "label": make_dataset_label_from_prep(pdx)}
-        tasks["mode"] = "single"
-        return tasks
-
-    # Nothing found
-    tasks["mode"] = None
-    return tasks
+# NEW: Drive ingestion
+import drive_ingest as din
+from googleapiclient.errors import HttpError
 
 # =========================
 # Streamlit compatibility shims
@@ -266,7 +40,6 @@ if "run_id" not in st.session_state: st.session_state.run_id = None
 if "out" not in st.session_state: st.session_state.out = None
 if "run_token" not in st.session_state: st.session_state.run_token = None
 if "multi" not in st.session_state: st.session_state.multi = None
-if "source" not in st.session_state: st.session_state.source = "Upload files (manual)"
 
 # =========================
 # THEME SELECTOR
@@ -344,93 +117,76 @@ background-size:300% 300%;-webkit-background-clip:text;-webkit-text-fill-color:t
 .subtitle{text-align:center;opacity:.9;font-size:1rem;margin-top:-0.6rem;font-style:italic}
 </style>
 <h1 class="centered-title"><span>🧬</span> Data Harmonization & QC Suite <span>🧬</span></h1>
-<p class="subtitle">Upload expression data or pull from Google Drive, then perform harmonization, QC, and analysis.</p>
+<p class="subtitle">Upload expression data, perform harmonization, QC, and analysis — all in one place.</p>
 """, unsafe_allow_html=True)
 
 # =========================
-# DATA SOURCE
-# =========================
-source = st.radio(
-    "Data source",
-    ["Upload files (manual)", "Google Drive (auto)"],
-    horizontal=True
-)
-st.session_state.source = source
-
-# =========================
-# UI CONTROLS (Manual upload)
+# UI CONTROLS
 # =========================
 mode = st.radio(
-    "Expression upload mode (manual)",
+    "Expression upload mode",
     ["Single expression matrix", "Multiple files (one per group)", "Multiple datasets (each has its own metadata)"],
-    horizontal=True,
-    disabled=(source != "Upload files (manual)")
+    horizontal=True
 )
 st.caption("Upload expression data and corresponding metadata, then click **Run Harmonization**.")
 
+# ---------------- Expression upload ----------------
 single_expr_file = None
 normal_file = atypia_file = hpv_pos_file = hpv_neg_file = None
 
-if source == "Upload files (manual)":
-    if mode == "Multiple files (one per group)":
-        with st.expander("1) Upload Expression Files (one per group)"):
-            col1, col2 = st.columns(2)
-            with col1:
-                normal_file = st.file_uploader("First (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="normal")
-                atypia_file = st.file_uploader("Second (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="atypia")
-            with col2:
-                hpv_pos_file = st.file_uploader("Third (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="hpvp")
-                hpv_neg_file = st.file_uploader("Fourth (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="hpvn")
-    elif mode == "Single expression matrix":
-        with st.expander("1) Upload Single Expression Matrix (XLSX/CSV/TSV)"):
-            single_expr_file = st.file_uploader("Expression matrix", type=["xlsx","csv","tsv","txt"], key="single_expr")
+if mode == "Multiple files (one per group)":
+    with st.expander("1) Upload Expression Files (one per group)"):
+        col1, col2 = st.columns(2)
+        with col1:
+            normal_file = st.file_uploader("First (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="normal")
+            atypia_file = st.file_uploader("Second (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="atypia")
+        with col2:
+            hpv_pos_file = st.file_uploader("Third (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="hpvp")
+            hpv_neg_file = st.file_uploader("Fourth (XLSX/CSV/TSV)", type=["xlsx","csv","tsv","txt"], key="hpvn")
+elif mode == "Single expression matrix":
+    with st.expander("1) Upload Single Expression Matrix (XLSX/CSV/TSV)"):
+        single_expr_file = st.file_uploader("Expression matrix", type=["xlsx","csv","tsv","txt"], key="single_expr")
 
 # ---------------- Metadata (single/multi-group) ----------------
-if source == "Upload files (manual)":
-    with st.expander("2) Upload Metadata (TSV/CSV/XLSX) [skip this for multi-dataset mode]"):
-        metadata_file = st.file_uploader("Metadata file", type=["tsv","csv","txt","xlsx"], key="meta")
+with st.expander("2) Upload Metadata (TSV/CSV/XLSX) [skip this for multi-dataset mode]"):
+    metadata_file = st.file_uploader("Metadata file", type=["tsv","csv","txt","xlsx"], key="meta")
 
-        id_cols = st.text_input("Candidate ID columns (comma-separated)",
-                                "sample,Sample,Id,ID,id,CleanID,sample_id,Sample_ID,SampleID")
-        grp_cols = st.text_input("Candidate GROUP columns (comma-separated)",
-                                 "group,Group,condition,Condition,phenotype,Phenotype")
-        batch_col = st.text_input("Batch column name (optional; leave blank to auto-detect)", "")
+    id_cols = st.text_input("Candidate ID columns (comma-separated)",
+                            "sample,Sample,Id,ID,id,CleanID,sample_id,Sample_ID,SampleID")
+    grp_cols = st.text_input("Candidate GROUP columns (comma-separated)",
+                             "group,Group,condition,Condition,phenotype,Phenotype")
+    batch_col = st.text_input("Batch column name (optional; leave blank to auto-detect)", "")
 
-        # Preview detected metadata columns + batch preview
-        if metadata_file is not None:
-            try:
-                bio = io.BytesIO(metadata_file.getvalue())
-                name = metadata_file.name.lower()
-                if name.endswith((".xlsx", ".xls")):
-                    mprev = pd.read_excel(bio, engine="openpyxl")
-                elif name.endswith((".tsv", ".txt")):
-                    mprev = pd.read_csv(bio, sep="\t")
-                else:
-                    mprev = pd.read_csv(bio, sep=None, engine="python")
-                st.caption(f"Detected metadata columns: {list(mprev.columns)}")
+    # Preview detected metadata columns + batch preview
+    if metadata_file is not None:
+        try:
+            bio = io.BytesIO(metadata_file.getvalue())
+            name = metadata_file.name.lower()
+            if name.endswith((".xlsx", ".xls")):
+                mprev = pd.read_excel(bio, engine="openpyxl")
+            elif name.endswith((".tsv", ".txt")):
+                mprev = pd.read_csv(bio, sep="\t")
+            else:
+                mprev = pd.read_csv(bio, sep=None, engine="python")
+            st.caption(f"Detected metadata columns: {list(mprev.columns)}")
 
-                from collections import Counter
-                _BATCH_HINTS = ["batch","Batch","BATCH","center","Center","site","Site","location","Location","series","Series",
-                                "geo_series","GEO_series","run","Run","lane","Lane","plate","Plate","sequencer","Sequencer",
-                                "flowcell","Flowcell","library","Library","library_prep","LibraryPrep","study","Study","project",
-                                "Project","lab","Lab","date","Date","collection_date","CollectionDate","source_name_ch1","title",
-                                "characteristics_ch1","characteristics"]
-                candidates = [c for c in _BATCH_HINTS if c in mprev.columns]
-                if candidates:
-                    st.caption(f"Batch-like columns found: {candidates}")
-                    pick = candidates[0]
-                    vc = mprev[pick].astype(str).value_counts().head(20)
-                    with st.expander(f"Preview batch levels from `{pick}` (top 20)"):
-                        st.write(vc)
-                with st.expander("Preview first 5 rows of metadata"):
-                    st.dataframe(mprev.head(5), use_container_width=True)
-            except Exception as e:
-                st.warning(f"Could not preview metadata columns: {e}")
-else:
-    metadata_file = None
-    id_cols = "sample,Sample,Id,ID,id,CleanID,sample_id,Sample_ID,SampleID"
-    grp_cols = "group,Group,condition,Condition,phenotype,Phenotype"
-    batch_col = ""
+            from collections import Counter
+            _BATCH_HINTS = ["batch","Batch","BATCH","center","Center","site","Site","location","Location","series","Series",
+                            "geo_series","GEO_series","run","Run","lane","Lane","plate","Plate","sequencer","Sequencer",
+                            "flowcell","Flowcell","library","Library","library_prep","LibraryPrep","study","Study","project",
+                            "Project","lab","Lab","date","Date","collection_date","CollectionDate","source_name_ch1","title",
+                            "characteristics_ch1","characteristics"]
+            candidates = [c for c in _BATCH_HINTS if c in mprev.columns]
+            if candidates:
+                st.caption(f"Batch-like columns found: {candidates}")
+                pick = candidates[0]
+                vc = mprev[pick].astype(str).value_counts().head(20)
+                with st.expander(f"Preview batch levels from `{pick}` (top 20)"):
+                    st.write(vc)
+            with st.expander("Preview first 5 rows of metadata"):
+                st.dataframe(mprev.head(5), use_container_width=True)
+        except Exception as e:
+            st.warning(f"Could not preview metadata columns: {e}")
 
 # ---------------- Optional GSEA ----------------
 with st.expander("3) Optional: GSEA gene set (.gmt)"):
@@ -442,10 +198,17 @@ with st.expander("Advanced settings"):
     pca_topk = st.number_input("Top variable genes for PCA", min_value=500, max_value=50000, value=5000, step=500)
     do_nonlinear = st.checkbox("Make UMAP/t-SNE (if available)", value=True)
 
-# ---------------- NEW: Multi-dataset mode (manual) ----------------
+# ---------------- NEW: Google Drive ingestion (Service Account) ----------------
+with st.expander("Google Drive ingestion (beta)"):
+    st.caption("Run directly from a Drive folder containing disease → subfolders → ... → **prep/** (final leaf) with counts + metadata.")
+    sa_json = st.file_uploader("Service Account JSON (share your Drive folder with this account as Viewer)", type=["json"], key="sa_json")
+    drive_folder_url = st.text_input("Root Drive folder URL", "https://drive.google.com/drive/folders/1q526yCAWVx-Lc_JPt256K9kC3htDAf8z")
+    run_from_drive = safe_button("🔗 Fetch from Drive & Run", use_container_width=True)
+
+# ---------------- NEW: Multi-dataset mode (expression+meta per dataset) ----------------
 multi_datasets = None
 combine_thresh = 3000
-if source == "Upload files (manual)" and mode == "Multiple datasets (each has its own metadata)":
+if mode == "Multiple datasets (each has its own metadata)":
     with st.expander("1) Upload Datasets (each has its own expression + metadata)"):
         n_ds = st.number_input("How many datasets?", min_value=2, max_value=12, value=3, step=1)
         st.caption("For each dataset, provide an expression matrix (XLSX/CSV/TSV) and a matching metadata file.")
@@ -486,225 +249,211 @@ if source == "Upload files (manual)" and mode == "Multiple datasets (each has it
                                          value=3000, step=250,
                                          help="If overlap ≥ this, datasets are combined; otherwise analyzed separately.")
 
-# ---------------- NEW: Google Drive (auto) controls ----------------
-if source == "Google Drive (auto)":
-    st.info("Paste the Google Drive folder URL or ID. We'll crawl subfolders to the final **prep** directories and auto-run the correct mode.")
-    drive_url = st.text_input("Google Drive folder URL or ID",
-                              "https://drive.google.com/drive/folders/1q526yCAWVx-Lc_JPt256K9kC3htDAf8z")
-else:
-    drive_url = ""
+# ---------------- Run (local uploads) ----------------
+run = safe_button("🚀 Run Harmonization", type="primary", use_container_width=True)
 
-# ---------------- Run ----------------
-if source == "Upload files (manual)":
-    run = safe_button("🚀 Run Harmonization", type="primary", use_container_width=True)
-else:
-    run = safe_button("🚀 Scan Drive & Run", type="primary", use_container_width=True)
+# ---------------- Handle Drive run ----------------
+if run_from_drive:
+    if not sa_json:
+        st.error("Please upload a Service Account JSON (and share your Drive folder with its client_email as Viewer).")
+        st.stop()
+    if not drive_folder_url.strip():
+        st.error("Please provide a Drive folder URL.")
+        st.stop()
+    try:
+        with st.spinner("Connecting to Drive and discovering prep folders..."):
+            drv = din.build_drive_client_from_sa_bytes(sa_json.getvalue())
+            plan = din.collect_from_root(drv, drive_folder_url.strip())
 
-if run:
-    if source == "Google Drive (auto)":
-        # 1) Mirror the Drive folder locally
-        try:
-            run_id = _dt.datetime.now().strftime("drive_%Y%m%d_%H%M%S")
-            root_out = os.path.join(out_dir, run_id)
-            os.makedirs(root_out, exist_ok=True)
-            folder_id = extract_drive_id(drive_url)
-            if not folder_id:
-                st.error("Could not parse a Google Drive folder ID from the input."); st.stop()
-            with st.spinner("Mirroring Google Drive folder..."):
-                local_root = download_drive_folder_recursive(folder_id, root_out)
+        kwargs_common = {
+            "out_root": out_dir,
+            "pca_topk_features": int(pca_topk),
+            "make_nonlinear": do_nonlinear,
+        }
 
-            # 2) Discover tasks
-            tasks = discover_tasks_from_drive(local_root)
-            if not tasks or not tasks.get("mode"):
-                st.error("No valid prep directories with counts + metadata were discovered.")
-                st.stop()
+        if plan["mode"] == "single":
+            (c_bio, c_name) = plan["single"]
+            (m_bio, m_name) = plan["meta"]
+            kwargs = dict(**kwargs_common)
+            kwargs.update({
+                "single_expression_file": io.BytesIO(c_bio.getvalue()),
+                "single_expression_name_hint": c_name,
+                "metadata_file": io.BytesIO(m_bio.getvalue()),
+                "metadata_name_hint": m_name,
+                "metadata_id_cols": [c.strip() for c in st.session_state.get("last_id_cols", "sample,Sample,Id,ID,id").split(",") if c.strip()] if "last_id_cols" in st.session_state else ["sample","Sample","Id","ID","id","CleanID","sample_id","Sample_ID","SampleID"],
+                "metadata_group_cols": [c.strip() for c in st.session_state.get("last_grp_cols", "group,Group,condition,Condition,phenotype,Phenotype").split(",") if c.strip()] if "last_grp_cols" in st.session_state else ["group","Group","condition","Condition","phenotype","Phenotype"],
+                "metadata_batch_col": (batch_col.strip() or None),
+            })
+            with st.spinner("Running harmonization (single dataset)..."):
+                run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
+                kwargs["out_root"] = os.path.join(out_dir, run_id)
+                out = hz.run_pipeline(**kwargs)
+                st.session_state.run_id = run_id
+                st.session_state.out = out
+                st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
+                try:
+                    st.cache_data.clear(); st.cache_resource.clear()
+                except Exception:
+                    pass
 
-            # Prepare optional GMT
-            gmt_path = None
-            if gmt_file:
-                tmpdir = tempfile.mkdtemp()
-                gmt_path = os.path.join(tmpdir, gmt_file.name)
-                with open(gmt_path, "wb") as fh: fh.write(gmt_file.getvalue())
+        elif plan["mode"] == "multi_files":
+            groups_dict = {}
+            for gname, (bio, fname) in plan["groups"].items():
+                groups_dict[gname] = io.BytesIO(bio.getvalue())
+            (m_bio, m_name) = plan["meta"]
+            kwargs = dict(**kwargs_common)
+            kwargs.update({
+                "group_to_file": groups_dict,
+                "metadata_file": io.BytesIO(m_bio.getvalue()),
+                "metadata_name_hint": m_name,
+                "metadata_id_cols": [c.strip() for c in st.session_state.get("last_id_cols", "sample,Sample,Id,ID,id").split(",") if c.strip()] if "last_id_cols" in st.session_state else ["sample","Sample","Id","ID","id","CleanID","sample_id","Sample_ID","SampleID"],
+                "metadata_group_cols": [c.strip() for c in st.session_state.get("last_grp_cols", "group,Group,condition,Condition,phenotype,Phenotype").split(",") if c.strip()] if "last_grp_cols" in st.session_state else ["group","Group","condition","Condition","phenotype","Phenotype"],
+                "metadata_batch_col": (batch_col.strip() or None),
+            })
+            with st.spinner("Running harmonization (multiple files, one meta)..."):
+                run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
+                kwargs["out_root"] = os.path.join(out_dir, run_id)
+                out = hz.run_pipeline(**kwargs)
+                st.session_state.run_id = run_id
+                st.session_state.out = out
+                st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
+                try:
+                    st.cache_data.clear(); st.cache_resource.clear()
+                except Exception:
+                    pass
 
-            # 3) Execute appropriate pipeline
-            # Common kwargs
-            common_id_cols = [c.strip() for c in id_cols.split(",") if c.strip()]
-            common_grp_cols = [c.strip() for c in grp_cols.split(",") if c.strip()]
-            common_batch = (batch_col.strip() or None)
-
-            if tasks["mode"] == "multi":
-                # Assemble datasets list for run_pipeline_multi
-                ds_list = []
-                for item in tasks["multi"]:
-                    ds_list.append({
-                        "geo": item["label"],
-                        "counts": bytes_from_path(item["counts"]),
-                        "counts_name": os.path.basename(item["counts"]),
-                        "meta": bytes_from_path(item["meta"]),
-                        "meta_name": os.path.basename(item["meta"]),
-                        "meta_id_cols": common_id_cols,
-                        "meta_group_cols": common_grp_cols,
-                        "meta_batch_col": common_batch
-                    })
-                kwargs_multi = {
-                    "datasets": ds_list,
-                    "attempt_combine": True,
-                    "combine_minoverlap_genes": int(combine_thresh),
-                    "out_root": os.path.join(out_dir, run_id),
-                    "pca_topk_features": int(pca_topk),
-                    "make_nonlinear": do_nonlinear,
-                }
-                with st.spinner("Running multi-dataset harmonization & meta-analysis..."):
-                    multi_out = hz.run_pipeline_multi(**kwargs_multi)
-                    st.session_state.run_id = run_id
-                    st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
-                    st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
-                    st.session_state.multi = multi_out
-                    try:
-                        st.cache_data.clear(); st.cache_resource.clear()
-                    except Exception:
-                        pass
-
-            elif tasks["mode"] == "group":
-                item = tasks["group"]
-                groups = build_group_dict(item["count_paths"])
-                kwargs = {
-                    "group_to_file": groups,
-                    "metadata_file": bytes_from_path(item["meta"]),
-                    "metadata_name_hint": os.path.basename(item["meta"]),
-                    "metadata_id_cols": common_id_cols,
-                    "metadata_group_cols": common_grp_cols,
-                    "metadata_batch_col": common_batch,
-                    "out_root": os.path.join(out_dir, run_id),
-                    "pca_topk_features": int(pca_topk),
-                    "make_nonlinear": do_nonlinear,
-                }
-                if gmt_path: kwargs["gsea_gmt"] = gmt_path
-                with st.spinner("Running group-based harmonization..."):
-                    out = hz.run_pipeline(**kwargs)
-                    st.session_state.run_id = run_id
-                    st.session_state.out = out
-                    st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
-                    st.session_state.multi = None
-                    try:
-                        st.cache_data.clear(); st.cache_resource.clear()
-                    except Exception:
-                        pass
-
-            elif tasks["mode"] == "single":
-                item = tasks["single"]
-                kwargs = {
-                    "single_expression_file": bytes_from_path(item["counts"]),
-                    "single_expression_name_hint": os.path.basename(item["counts"]),
-                    "metadata_file": bytes_from_path(item["meta"]),
-                    "metadata_name_hint": os.path.basename(item["meta"]),
-                    "metadata_id_cols": common_id_cols,
-                    "metadata_group_cols": common_grp_cols,
-                    "metadata_batch_col": common_batch,
-                    "out_root": os.path.join(out_dir, run_id),
-                    "pca_topk_features": int(pca_topk),
-                    "make_nonlinear": do_nonlinear,
-                }
-                if gmt_path: kwargs["gsea_gmt"] = gmt_path
-                with st.spinner("Running single-dataset harmonization..."):
-                    out = hz.run_pipeline(**kwargs)
-                    st.session_state.run_id = run_id
-                    st.session_state.out = out
-                    st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
-                    st.session_state.multi = None
-                    try:
-                        st.cache_data.clear(); st.cache_resource.clear()
-                    except Exception:
-                        pass
-            else:
-                st.error("Could not resolve a valid execution mode from Drive contents.")
-                st.stop()
-
-        except Exception as e:
-            st.error(f"Drive run failed: {e}")
-            st.stop()
-
-    else:
-        # Manual upload path
-        if mode == "Multiple datasets (each has its own metadata)":
-            if not multi_datasets or len(multi_datasets) < 2:
-                st.error("Please provide at least two datasets (each with expression + metadata)."); st.stop()
-            kwargs_multi = {
-                "datasets": multi_datasets,
+        elif plan["mode"] == "multi_dataset":
+            ds = []
+            # Use current text inputs for ID/GROUP candidates if provided
+            idc = [c.strip() for c in st.session_state.get("last_id_cols", "sample,Sample,Id,ID,id").split(",") if c.strip()] if "last_id_cols" in st.session_state else ["sample","Sample","Id","ID","id","CleanID","sample_id","Sample_ID","SampleID"]
+            grpc = [c.strip() for c in st.session_state.get("last_grp_cols", "group,Group,condition,Condition,phenotype,Phenotype").split(",") if c.strip()] if "last_grp_cols" in st.session_state else ["group","Group","condition","Condition","phenotype","Phenotype"]
+            for d in plan["datasets"]:
+                c_bio, c_name = d["counts"]
+                m_bio, m_name = d["meta"]
+                ds.append({
+                    "geo": d["geo"],
+                    "counts": io.BytesIO(c_bio.getvalue()),
+                    "counts_name": c_name,
+                    "meta": io.BytesIO(m_bio.getvalue()),
+                    "meta_name": m_name,
+                    "meta_id_cols": idc,
+                    "meta_group_cols": grpc,
+                    "meta_batch_col": (batch_col.strip() or None),
+                })
+            kwargs_multi = dict(**kwargs_common)
+            kwargs_multi.update({
+                "datasets": ds,
                 "attempt_combine": True,
                 "combine_minoverlap_genes": int(combine_thresh),
                 "out_root": out_dir,
-                "pca_topk_features": int(pca_topk),
-                "make_nonlinear": do_nonlinear,
-            }
-            try:
-                with st.spinner("Running multi-dataset harmonization & meta-analysis..."):
-                    run_id = _dt.datetime.now().strftime("multirun_%Y%m%d_%H%M%S")
-                    kwargs_multi["out_root"] = os.path.join(out_dir, run_id)
-                    multi_out = hz.run_pipeline_multi(**kwargs_multi)
-                    st.session_state.run_id = run_id
-                    st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
-                    st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
-                    st.session_state.multi = multi_out
-                    try:
-                        st.cache_data.clear(); st.cache_resource.clear()
-                    except Exception:
-                        pass
-            except Exception as e:
-                st.error(f"Multi-dataset run failed: {e}")
-                st.stop()
+            })
+            with st.spinner("Running multi-dataset harmonization & meta-analysis..."):
+                run_id = _dt.datetime.now().strftime("multirun_%Y%m%d_%H%M%S")
+                kwargs_multi["out_root"] = os.path.join(out_dir, run_id)
+                multi_out = hz.run_pipeline_multi(**kwargs_multi)
+                st.session_state.run_id = run_id
+                st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
+                st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
+                st.session_state.multi = multi_out
+                try:
+                    st.cache_data.clear(); st.cache_resource.clear()
+                except Exception:
+                    pass
         else:
-            if metadata_file is None:
-                st.error("Please upload a metadata file."); st.stop()
+            st.error(f"Unsupported plan mode: {plan.get('mode')}")
+            st.stop()
 
-            kwargs = {
-                "metadata_file": io.BytesIO(metadata_file.getvalue()),
-                "metadata_name_hint": metadata_file.name,
-                "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip()],
-                "metadata_group_cols": [c.strip() for c in grp_cols.split(",") if c.strip()],
-                "metadata_batch_col": (batch_col.strip() or None),  # None => auto-detect
-                "out_root": out_dir,
-                "pca_topk_features": int(pca_topk),
-                "make_nonlinear": do_nonlinear,
-            }
+    except HttpError as he:
+        st.error(f"Drive API error: {he}")
+    except Exception as e:
+        st.error(f"Drive ingestion failed: {e}")
 
-            gmt_path = None
+# ---------------- Handle local uploads run ----------------
+if run:
+    if mode == "Multiple datasets (each has its own metadata)":
+        if not multi_datasets or len(multi_datasets) < 2:
+            st.error("Please provide at least two datasets (each with expression + metadata)."); st.stop()
+        kwargs_multi = {
+            "datasets": multi_datasets,
+            "attempt_combine": True,
+            "combine_minoverlap_genes": int(combine_thresh),
+            "out_root": out_dir,
+            "pca_topk_features": int(pca_topk),
+            "make_nonlinear": do_nonlinear,
+        }
+        try:
+            with st.spinner("Running multi-dataset harmonization & meta-analysis..."):
+                run_id = _dt.datetime.now().strftime("multirun_%Y%m%d_%H%M%S")
+                kwargs_multi["out_root"] = os.path.join(out_dir, run_id)
+                multi_out = hz.run_pipeline_multi(**kwargs_multi)
+                st.session_state.run_id = run_id
+                st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
+                st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
+                st.session_state.multi = multi_out
+                try:
+                    st.cache_data.clear(); st.cache_resource.clear()
+                except Exception:
+                    pass
+        except Exception as e:
+            st.error(f"Multi-dataset run failed: {e}")
+            st.stop()
+    else:
+        if not metadata_file:
+            st.error("Please upload a metadata file."); st.stop()
+
+        st.session_state.last_id_cols = id_cols
+        st.session_state.last_grp_cols = grp_cols
+
+        kwargs = {
+            "metadata_file": io.BytesIO(metadata_file.getvalue()),
+            "metadata_name_hint": metadata_file.name,
+            "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip()],
+            "metadata_group_cols": [c.strip() for c in grp_cols.split(",") if c.strip()],
+            "metadata_batch_col": (batch_col.strip() or None),  # None => auto-detect
+            "out_root": out_dir,
+            "pca_topk_features": int(pca_topk),
+            "make_nonlinear": do_nonlinear,
+        }
+
+        gmt_path = None
+        if gmt_file:
+            tmpdir = tempfile.mkdtemp()
+            gmt_path = os.path.join(tmpdir, gmt_file.name)
+            with open(gmt_path, "wb") as fh: fh.write(gmt_file.getvalue())
+            kwargs["gsea_gmt"] = gmt_path
+
+        if mode == "Multiple files (one per group)":
+            groups = {}
+            if normal_file: groups["First"] = io.BytesIO(normal_file.getvalue())
+            if atypia_file: groups["Second"] = io.BytesIO(atypia_file.getvalue())
+            if hpv_pos_file: groups["Third"] = io.BytesIO(hpv_pos_file.getvalue())
+            if hpv_neg_file: groups["Fourth"] = io.BytesIO(hpv_neg_file.getvalue())
+            if not groups:
+                st.error("Please upload at least one expression file."); st.stop()
+            kwargs["group_to_file"] = groups
+        else:
+            if not single_expr_file:
+                st.error("Please upload the expression matrix."); st.stop()
+            kwargs["single_expression_file"] = io.BytesIO(single_expr_file.getvalue())
+            kwargs["single_expression_name_hint"] = single_expr_file.name
+
+        try:
+            with st.spinner("Running harmonization..."):
+                run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
+                kwargs["out_root"] = os.path.join(out_dir, run_id)
+                out = hz.run_pipeline(**kwargs)
+                st.session_state.run_id = run_id
+                st.session_state.out = out
+                st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
+                try:
+                    st.cache_data.clear(); st.cache_resource.clear()
+                except Exception:
+                    pass
+        except Exception as e:
+            st.error(f"Run failed: {e}")
             if gmt_file:
-                tmpdir = tempfile.mkdtemp()
-                gmt_path = os.path.join(tmpdir, gmt_file.name)
-                with open(gmt_path, "wb") as fh: fh.write(gmt_file.getvalue())
-                kwargs["gsea_gmt"] = gmt_path
-
-            if mode == "Multiple files (one per group)":
-                groups = {}
-                if normal_file: groups["First"] = io.BytesIO(normal_file.getvalue())
-                if atypia_file: groups["Second"] = io.BytesIO(atypia_file.getvalue())
-                if hpv_pos_file: groups["Third"] = io.BytesIO(hpv_pos_file.getvalue())
-                if hpv_neg_file: groups["Fourth"] = io.BytesIO(hpv_neg_file.getvalue())
-                if not groups:
-                    st.error("Please upload at least one expression file."); st.stop()
-                kwargs["group_to_file"] = groups
-            else:
-                if not single_expr_file:
-                    st.error("Please upload the expression matrix."); st.stop()
-                kwargs["single_expression_file"] = io.BytesIO(single_expr_file.getvalue())
-                kwargs["single_expression_name_hint"] = single_expr_file.name
-
-            try:
-                with st.spinner("Running harmonization..."):
-                    run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
-                    kwargs["out_root"] = os.path.join(out_dir, run_id)
-                    out = hz.run_pipeline(**kwargs)
-                    st.session_state.run_id = run_id
-                    st.session_state.out = out
-                    st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
-                    try:
-                        st.cache_data.clear(); st.cache_resource.clear()
-                    except Exception:
-                        pass
-            except Exception as e:
-                st.error(f"Run failed: {e}")
-                st.stop()
+                shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
+            st.stop()
 
 # =========================
 # RESULTS (always visible)
@@ -718,7 +467,7 @@ out_curr = st.session_state.get("out"); run_id = st.session_state.get("run_id")
 # ---- Overview
 with tabs[0]:
     if not out_curr:
-        st.info("No run loaded yet. Provide data and run.")
+        st.info("No run loaded yet. Upload data or use **Fetch from Drive & Run**.")
     else:
         report = {}
         try:
@@ -756,7 +505,7 @@ with tabs[0]:
 
         fig_dir = out_curr["figdir"]
         previews = ["dist_pre_vs_post_log2.png","pca_clean_groups.png","enhanced_pca_analysis.png"]
-        show = [f for f in previews if os.path.exists(os.path.join(fig_dir, f))] if fig_dir else []
+        show = [f for f in previews if os.path.exists(os.path.join(fig_dir, f))]
         if show:
             st.write("### Key Figures")
             c1, c2, c3 = st.columns(3); cols = [c1, c2, c3]
