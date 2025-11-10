@@ -1,10 +1,12 @@
 # drive_ingest.py
-# Discover nested `prep/` folders in Google Drive and download counts + metadata.
+# Discover nested `prep/` folders in Google Drive under a deg_data root,
+# optionally filtered by disease keyword(s), and download counts + metadata.
+
 import io
 import re
 import time
 import json
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Iterable
 from dataclasses import dataclass
 
 from google.oauth2.service_account import Credentials
@@ -19,17 +21,12 @@ META_HINTS = ("meta", "metadata", "pheno", "clinical", "sample", "phenotype")
 
 def parse_folder_id(url_or_id: str) -> str:
     s = url_or_id.strip()
-    # Raw ID (Drive ids are long-ish base64-like)
-    if re.fullmatch(r"[A-Za-z0-9_\-]{20,}", s):
+    if re.fullmatch(r"[A-Za-z0-9_\-]{20,}", s):  # looks like a raw id
         return s
-    # /folders/<id>
     m = re.search(r"/folders/([A-Za-z0-9_\-]+)", s)
-    if m:
-        return m.group(1)
-    # ?id=<id>
+    if m: return m.group(1)
     m = re.search(r"[?&]id=([A-Za-z0-9_\-]+)", s)
-    if m:
-        return m.group(1)
+    if m: return m.group(1)
     raise ValueError("Could not parse a Drive folder ID from the provided link.")
 
 
@@ -46,6 +43,15 @@ def _looks_like_counts(name: str) -> bool:
 def _looks_like_meta(name: str) -> bool:
     nm = name.lower()
     return any(h in nm for h in META_HINTS) and _is_data_file(name)
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
+
+
+def _any_token_matches(name: str, tokens: Iterable[str]) -> bool:
+    n = _norm(name)
+    return any(tok and tok in n for tok in tokens)
 
 
 @dataclass
@@ -71,12 +77,10 @@ class DriveClient:
 
     def __init__(self, creds: Credentials):
         self.creds = creds
-        # cache_discovery=False avoids a write in restricted envs
         self.svc = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     @classmethod
     def from_service_account_bytes(cls, json_bytes: bytes, scopes: Optional[List[str]] = None):
-        """Build a DriveClient from the uploaded Service Account JSON (bytes)."""
         scopes = scopes or ["https://www.googleapis.com/auth/drive.readonly"]
         info = json.loads(json_bytes.decode("utf-8"))
         creds = Credentials.from_service_account_info(info=info, scopes=scopes)
@@ -104,7 +108,6 @@ class DriveClient:
         return out
 
     def get_file_path_chain(self, file_or_folder_id: str, stop_id: Optional[str] = None) -> List[DriveFile]:
-        """Walk parents up to root (or stop_id), materialize names."""
         fields = "id, name, mimeType, parents"
         chain: List[DriveFile] = []
         cur = file_or_folder_id
@@ -129,7 +132,6 @@ class DriveClient:
         return chain
 
     def download_file(self, file_id: str) -> Tuple[bytes, str]:
-        """Return (bytes, suggested_name). Retries on transient errors."""
         meta = self.svc.files().get(fileId=file_id, fields="id,name").execute()
         name = meta.get("name", "file.bin")
         req = self.svc.files().get_media(fileId=file_id)
@@ -146,23 +148,33 @@ class DriveClient:
         buf.seek(0)
         return buf.read(), name
 
-    # ------------------ Recursive discovery ------------------
+    # ------------------ Discovery ------------------
 
-    def find_all_prep_folders(self, root_folder_id: str) -> List[PrepBundle]:
+    def list_disease_folders(self, root_folder_id: str) -> List[DriveFile]:
+        """Return folders directly under root (deg_data)."""
+        return [c for c in self.get_children(root_folder_id) if c.mimeType == FOLDER_MIME]
+
+    def list_disease_folders_matching(self, root_folder_id: str, disease_query: Optional[str]) -> List[DriveFile]:
+        all_folders = self.list_disease_folders(root_folder_id)
+        if not disease_query:
+            return all_folders
+        tokens = [_norm(t) for t in re.split(r"[,\s]+", disease_query) if t.strip()]
+        if not tokens:
+            return all_folders
+        return [d for d in all_folders if _any_token_matches(d.name, tokens)]
+
+    def find_all_prep_folders(self, root_folder_id: str, disease_query: Optional[str] = None) -> List[PrepBundle]:
         """
         BFS through nested folders:
-        deg_data / <disease> / ... / prep / {counts/meta files}
+        deg_data / <disease (filtered by query)> / ... / prep / {counts/meta files}
         Returns a list of PrepBundle with discovered files.
         """
         results: List[PrepBundle] = []
 
-        # 1) diseases directly under root
-        root_children = self.get_children(root_folder_id)
-        disease_folders = [c for c in root_children if c.mimeType == FOLDER_MIME]
+        disease_folders = self.list_disease_folders_matching(root_folder_id, disease_query)
 
         for disease in disease_folders:
             disease_name = disease.name
-            # BFS under each disease to find leaf folders named "prep"
             queue = [disease]
             visited = set()
             while queue:
@@ -174,7 +186,6 @@ class DriveClient:
                 for k in kids:
                     if k.mimeType == FOLDER_MIME:
                         if k.name.strip().lower() == "prep":
-                            # collect files *inside* this prep folder
                             prep_files = self.get_children(k.id)
                             counts = [f for f in prep_files if _looks_like_counts(f.name)]
                             metas = [f for f in prep_files if _looks_like_meta(f.name)]
@@ -196,18 +207,23 @@ class DriveClient:
 
 # ------------------ Planning logic ------------------
 
-def make_ingest_plan(drive: DriveClient, root_url_or_id: str) -> Dict:
+def make_ingest_plan(
+    drive: DriveClient,
+    root_url_or_id: str,
+    disease_query: Optional[str] = None
+) -> Dict:
     """
-    Build a plan describing how to run:
+    Build a plan describing how to run from deg_data:
+      - Filter disease folders by keyword (e.g., "acute", "myeloid", "lukemia").
       - 'single'                    → one prep with 1 counts & 1 meta
       - 'multi_files_one_meta'     → one prep with >=2 counts and exactly 1 meta
       - 'multi_dataset'            → >=2 preps, each with their own counts+meta
     """
     root_id = parse_folder_id(root_url_or_id)
-    preps = drive.find_all_prep_folders(root_id)
+    preps = drive.find_all_prep_folders(root_id, disease_query=disease_query)
 
     if not preps:
-        return {"mode": "none", "reason": "No prep folders found.", "preps": []}
+        return {"mode": "none", "reason": "No prep folders found for the given disease query.", "preps": []}
 
     usable = [p for p in preps if len(p.counts) > 0]
     if not usable:
@@ -229,7 +245,7 @@ def make_ingest_plan(drive: DriveClient, root_url_or_id: str) -> Dict:
                 # skip preps without metadata in multi-dataset mode
                 continue
 
-            # choose best counts
+            # choose best counts (prioritize TSV/TXT over CSV, then XLSX)
             def _score_counts(df: DriveFile):
                 nm = df.name.lower()
                 hits = sum(int(h in nm) for h in COUNT_HINTS)
@@ -239,20 +255,24 @@ def make_ingest_plan(drive: DriveClient, root_url_or_id: str) -> Dict:
 
             c_bytes, c_name = drive.download_file(best_counts.id)
             m_bytes, m_name = drive.download_file(meta_file.id)
-            label = f"{p.disease} :: {p.path.split('/')[-2]} / prep" if "/" in p.path else p.path
+
+            # label includes disease + the parent of prep (often a UUID-ish)
+            tail = p.path.split("/")[-2] if "/" in p.path else p.path
+            label = f"{p.disease} :: {tail}/prep"
 
             datasets.append({
                 "label": label,
+                "disease": p.disease,
                 "counts": io.BytesIO(c_bytes),
                 "counts_name": c_name,
                 "meta": io.BytesIO(m_bytes),
                 "meta_name": m_name,
+                "path": p.path,
             })
 
         if len(datasets) >= 2:
             return {"mode": "multi_dataset", "datasets": datasets, "preps_found": len(usable)}
 
-        # Fallback: if exactly one valid dataset, treat as single
         if len(datasets) == 1:
             single = datasets[0]
             return {
@@ -262,6 +282,7 @@ def make_ingest_plan(drive: DriveClient, root_url_or_id: str) -> Dict:
                     "counts_name": single["counts_name"],
                     "meta": single["meta"],
                     "meta_name": single["meta_name"],
+                    "label": single["label"],
                 },
                 "preps_found": len(usable),
             }
@@ -282,6 +303,7 @@ def make_ingest_plan(drive: DriveClient, root_url_or_id: str) -> Dict:
         for i, cf in enumerate(p.counts, 1):
             c_bytes, c_name = drive.download_file(cf.id)
             base = re.sub(r"\.[^.]+$", "", cf.name)
+            # keep short-ish label; otherwise fallback
             label = base if len(base) <= 40 else f"Group_{i}"
             groups[label] = (io.BytesIO(c_bytes), c_name)
 
@@ -291,6 +313,7 @@ def make_ingest_plan(drive: DriveClient, root_url_or_id: str) -> Dict:
             "meta_name": m_name,
             "groups": groups,
             "prep_path": p.path,
+            "disease": p.disease,
         }
 
     # One counts + one meta → single
@@ -303,6 +326,8 @@ def make_ingest_plan(drive: DriveClient, root_url_or_id: str) -> Dict:
         best_counts = p.counts[0]
         c_bytes, c_name = drive.download_file(best_counts.id)
         m_bytes, m_name = drive.download_file(meta_file.id)
+        tail = p.path.split("/")[-2] if "/" in p.path else p.path
+        label = f"{p.disease} :: {tail}/prep"
         return {
             "mode": "single",
             "single": {
@@ -310,8 +335,10 @@ def make_ingest_plan(drive: DriveClient, root_url_or_id: str) -> Dict:
                 "counts_name": c_name,
                 "meta": io.BytesIO(m_bytes),
                 "meta_name": m_name,
+                "label": label,
             },
             "prep_path": p.path,
+            "disease": p.disease,
         }
 
     # Ambiguous contents
@@ -319,4 +346,5 @@ def make_ingest_plan(drive: DriveClient, root_url_or_id: str) -> Dict:
         "mode": "none",
         "reason": f"Ambiguous contents in prep folder: counts={len(p.counts)}, metas={len(p.metas)}",
         "prep_path": p.path,
+        "disease": p.disease,
     }
