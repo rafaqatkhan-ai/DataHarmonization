@@ -1,53 +1,37 @@
-# app.py — supports: manual uploads + Google Drive ingestion of nested 'prep' folders.
+# app.py — Drive-aware harmonization UI with disease search & per-dataset comparisons
 import os, io, tempfile, shutil, json
-import streamlit as st
-import pandas as pd
-import harmonizer as hz
 import datetime as _dt
+import itertools
+import pandas as pd
+import streamlit as st
 
-# NEW:
+import harmonizer as hz
 import drive_ingest as din
 
 # =========================
-# Streamlit compatibility shims
-# =========================
-def safe_button(label, **kwargs):
-    try:
-        return st.button(label, **kwargs)
-    except Exception:
-        kwargs.pop("type", None); kwargs.pop("use_container_width", None)
-        return st.button(label, **kwargs)
-
-def safe_download_button(label, data=None, **kwargs):
-    try:
-        return st.download_button(label=label, data=data, **kwargs)
-    except Exception:
-        kwargs.pop("use_container_width", None)
-        try:
-            return st.download_button(label=label, data=data, **kwargs)
-        except Exception:
-            for k in ["mime","file_name","help","key"]: kwargs.pop(k, None)
-            return st.download_button(label=label, data=data)
-
-# =========================
-# Page Setup
+# Streamlit Setup
 # =========================
 st.set_page_config(page_title="🧬 Data Harmonization & QC Suite", page_icon="🧬", layout="wide")
+
+# Cache clear helper
+def _clear_caches():
+    try:
+        st.cache_data.clear()
+        st.cache_resource.clear()
+    except Exception:
+        pass
 
 # Init session state
 if "run_id" not in st.session_state: st.session_state.run_id = None
 if "out" not in st.session_state: st.session_state.out = None
 if "run_token" not in st.session_state: st.session_state.run_token = None
 if "multi" not in st.session_state: st.session_state.multi = None
-if "drive_plan" not in st.session_state: st.session_state.drive_plan = None
+if "last_plan" not in st.session_state: st.session_state.last_plan = None
+if "input_source" not in st.session_state: st.session_state.input_source = "Manual upload"
 
 # =========================
-# THEME
+# THEME SELECTOR
 # =========================
-theme = st.selectbox("Theme",
-    ["Light Gray","Soft Off-White","Deep Navy","Slate Blue"],
-    index=0, help="Pick a background style for the app.")
-
 def apply_theme(t: str):
     if t == "Light Gray":
         css = """<style>
@@ -103,6 +87,7 @@ def apply_theme(t: str):
         </style>"""
     st.markdown(css, unsafe_allow_html=True)
 
+theme = st.selectbox("Theme", ["Light Gray","Soft Off-White","Deep Navy","Slate Blue"], index=0)
 apply_theme(theme)
 
 # =========================
@@ -117,160 +102,61 @@ background-size:300% 300%;-webkit-background-clip:text;-webkit-text-fill-color:t
 .subtitle{text-align:center;opacity:.9;font-size:1rem;margin-top:-0.6rem;font-style:italic}
 </style>
 <h1 class="centered-title"><span>🧬</span> Data Harmonization & QC Suite <span>🧬</span></h1>
-<p class="subtitle">Upload expression data, or fetch from Google Drive (nested <code>prep/</code> folders), then run harmonization & QC.</p>
+<p class="subtitle">Upload manually or pull from Google Drive by disease keywords—then harmonize, QC, and compare.</p>
 """, unsafe_allow_html=True)
 
 # =========================
-# SOURCE SELECTOR (Manual vs Drive)
+# Input Source (Manual vs Drive)
 # =========================
-source = st.radio("Data source", ["Manual upload", "Google Drive (Service Account)"], horizontal=True)
-
-# Common Advanced settings
-with st.expander("Advanced settings"):
-    out_dir = st.text_input("Output directory", "out")
-    pca_topk = st.number_input("Top variable genes for PCA", min_value=500, max_value=50000, value=5000, step=500)
-    do_nonlinear = st.checkbox("Make UMAP/t-SNE (if available)", value=True)
+st.sidebar.header("Input Source")
+input_source = st.sidebar.radio(
+    "Choose input source",
+    ["Manual upload", "Google Drive (deg_data)"],
+    index=0,
+    help="Use Drive mode to search by disease keywords inside your deg_data folder and auto-run."
+)
+st.session_state.input_source = input_source
 
 # =========================
-# GOOGLE DRIVE FLOW
+# Manual Upload Controls (existing modes)
 # =========================
-if source == "Google Drive (Service Account)":
-    st.subheader("Google Drive Setup")
-    st.caption("Upload your Service Account JSON and paste your deg_data folder link (shared with the Service Account as **Viewer**).")
+def safe_button(label, **kwargs):
+    try:
+        return st.button(label, **kwargs)
+    except Exception:
+        kwargs.pop("type", None); kwargs.pop("use_container_width", None)
+        return st.button(label, **kwargs)
 
-    json_file = st.file_uploader("Service Account JSON", type=["json"], key="svc_json")
-    drive_link = st.text_input("Drive folder link (deg_data root)", "https://drive.google.com/drive/u/0/folders/1ypvs4oXwuPB0lxEW5vepYkJsf-WPzyIo")
-
-    cold1, cold2 = st.columns([1,1])
-    with cold1:
-        run_drive = safe_button("🔗 Fetch from Drive & Plan", type="primary", use_container_width=True)
-    with cold2:
-        run_drive_all = safe_button("🚀 Fetch from Drive & Run", type="primary", use_container_width=True)
-
-    if run_drive or run_drive_all:
-        if not json_file:
-            st.error("Please upload a Service Account JSON first.")
-            st.stop()
+def safe_download_button(label, data=None, **kwargs):
+    try:
+        return st.download_button(label=label, data=data, **kwargs)
+    except Exception:
+        kwargs.pop("use_container_width", None)
         try:
-            drv = din.DriveClient.from_service_account_bytes(json_file.getvalue())
-            with st.spinner("Scanning Drive for nested 'prep/' folders..."):
-                plan = din.make_ingest_plan(drv, drive_link)
-            st.session_state.drive_plan = plan
-        except Exception as e:
-            st.error(f"Drive scan failed: {e}")
-            st.stop()
+            return st.download_button(label=label, data=data, **kwargs)
+        except Exception:
+            for k in ["mime","file_name","help","key"]: kwargs.pop(k, None)
+            return st.download_button(label=label, data=data)
 
-        # Show plan
-        st.write("### Drive ingestion plan")
-        st.json({k: (v if k != "datasets" else [{"label": d["label"], "counts_name": d["counts_name"], "meta_name": d["meta_name"]} for d in v])
-                 for k, v in st.session_state.drive_plan.items()})
+mode = None
+single_expr_file = None
+normal_file = atypia_file = hpv_pos_file = hpv_neg_file = None
+metadata_file = None
+id_cols = grp_cols = batch_col = ""
+gmt_file = None
+out_dir = "out"
+pca_topk = 5000
+do_nonlinear = True
+combine_thresh = 3000
+multi_datasets = None
 
-        if plan.get("mode") == "none":
-            st.warning(plan.get("reason", "No usable data found."))
-
-        if run_drive_all and plan.get("mode") != "none":
-            # map plan to harmonizer call
-            mode = plan["mode"]
-            run_id = _dt.datetime.now().strftime("drive_%Y%m%d_%H%M%S")
-            out_root = os.path.join(out_dir, run_id)
-
-            try:
-                with st.spinner("Running harmonization from Drive plan..."):
-                    if mode == "single":
-                        single = plan["single"]
-                        kwargs = {
-                            "single_expression_file": single["counts"],
-                            "single_expression_name_hint": single["counts_name"],
-                            "metadata_file": single["meta"],
-                            "metadata_name_hint": single["meta_name"],
-                            "metadata_id_cols": ["sample","Sample","Id","ID","id","CleanID","bare_id","sample_id","Sample_ID","SampleID"],
-                            "metadata_group_cols": ["group","Group","condition","Condition","phenotype","Phenotype"],
-                            "metadata_batch_col": None,
-                            "out_root": out_root,
-                            "pca_topk_features": int(pca_topk),
-                            "make_nonlinear": do_nonlinear,
-                        }
-                        out = hz.run_pipeline(**kwargs)
-                        st.session_state.run_id = run_id
-                        st.session_state.out = out
-                        st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
-                        st.session_state.multi = None
-
-                    elif mode == "multi_files_one_meta":
-                        meta_b = plan["meta"]
-                        meta_name = plan["meta_name"]
-                        groups = plan["groups"]  # dict: label -> (BytesIO, name)
-                        kwargs = {
-                            "group_to_file": {label: bio for label, (bio, _) in groups.items()},
-                            "metadata_file": meta_b,
-                            "metadata_name_hint": meta_name,
-                            "metadata_id_cols": ["sample","Sample","Id","ID","id","CleanID","bare_id","sample_id","Sample_ID","SampleID"],
-                            "metadata_group_cols": ["group","Group","condition","Condition","phenotype","Phenotype"],
-                            "metadata_batch_col": None,
-                            "out_root": out_root,
-                            "pca_topk_features": int(pca_topk),
-                            "make_nonlinear": do_nonlinear,
-                        }
-                        out = hz.run_pipeline(**kwargs)
-                        st.session_state.run_id = run_id
-                        st.session_state.out = out
-                        st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
-                        st.session_state.multi = None
-
-                    elif mode == "multi_dataset":
-                        datasets = []
-                        for d in plan["datasets"]:
-                            datasets.append({
-                                "geo": d["label"],
-                                "counts": d["counts"],
-                                "counts_name": d["counts_name"],
-                                "meta": d["meta"],
-                                "meta_name": d["meta_name"],
-                                "meta_id_cols": ["sample","Sample","Id","ID","id","CleanID","bare_id","sample_id","Sample_ID","SampleID"],
-                                "meta_group_cols": ["group","Group","condition","Condition","phenotype","Phenotype"],
-                                "meta_batch_col": None,
-                            })
-                        kwargs_multi = {
-                            "datasets": datasets,
-                            "attempt_combine": True,
-                            "combine_minoverlap_genes": 3000,
-                            "out_root": out_root,
-                            "pca_topk_features": int(pca_topk),
-                            "make_nonlinear": do_nonlinear,
-                        }
-                        multi_out = hz.run_pipeline_multi(**kwargs_multi)
-                        st.session_state.run_id = run_id
-                        st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
-                        st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
-                        st.session_state.multi = multi_out
-
-                try:
-                    st.cache_data.clear(); st.cache_resource.clear()
-                except Exception:
-                    pass
-
-            except Exception as e:
-                st.error(f"Run from Drive plan failed: {e}")
-                st.stop()
-
-# =========================
-# MANUAL UPLOAD FLOW
-# =========================
-if source == "Manual upload":
-    st.subheader("Manual upload")
-    st.caption("Upload expression data and corresponding metadata, then click **Run Harmonization**.")
-
+if input_source == "Manual upload":
     mode = st.radio(
         "Expression upload mode",
         ["Single expression matrix", "Multiple files (one per group)", "Multiple datasets (each has its own metadata)"],
         horizontal=True
     )
-
-    # ---------------- Expression upload ----------------
-    single_expr_file = None
-    normal_file = atypia_file = hpv_pos_file = hpv_neg_file = None
-    multi_datasets = None
-    combine_thresh = 3000
+    st.caption("Upload expression data and corresponding metadata, then click **Run Harmonization**.")
 
     if mode == "Multiple files (one per group)":
         with st.expander("1) Upload Expression Files (one per group)"):
@@ -285,17 +171,13 @@ if source == "Manual upload":
         with st.expander("1) Upload Single Expression Matrix (XLSX/CSV/TSV)"):
             single_expr_file = st.file_uploader("Expression matrix", type=["xlsx","csv","tsv","txt"], key="single_expr")
 
-    # ---------------- Metadata (single/multi-group) ----------------
     with st.expander("2) Upload Metadata (TSV/CSV/XLSX) [skip this for multi-dataset mode]"):
         metadata_file = st.file_uploader("Metadata file", type=["tsv","csv","txt","xlsx"], key="meta")
-
         id_cols = st.text_input("Candidate ID columns (comma-separated)",
-                                "sample,Sample,Id,ID,id,CleanID,sample_id,Sample_ID,SampleID,bare_id")
+                                "sample,Sample,Id,ID,id,CleanID,sample_id,Sample_ID,SampleID")
         grp_cols = st.text_input("Candidate GROUP columns (comma-separated)",
                                  "group,Group,condition,Condition,phenotype,Phenotype")
         batch_col = st.text_input("Batch column name (optional; leave blank to auto-detect)", "")
-
-        # Preview detected metadata columns + batch preview
         if metadata_file is not None:
             try:
                 bio = io.BytesIO(metadata_file.getvalue())
@@ -307,8 +189,6 @@ if source == "Manual upload":
                 else:
                     mprev = pd.read_csv(bio, sep=None, engine="python")
                 st.caption(f"Detected metadata columns: {list(mprev.columns)}")
-
-                from collections import Counter
                 _BATCH_HINTS = ["batch","Batch","BATCH","center","Center","site","Site","location","Location","series","Series",
                                 "geo_series","GEO_series","run","Run","lane","Lane","plate","Plate","sequencer","Sequencer",
                                 "flowcell","Flowcell","library","Library","library_prep","LibraryPrep","study","Study","project",
@@ -326,11 +206,15 @@ if source == "Manual upload":
             except Exception as e:
                 st.warning(f"Could not preview metadata columns: {e}")
 
-    # ---------------- Optional GSEA ----------------
     with st.expander("3) Optional: GSEA gene set (.gmt)"):
         gmt_file = st.file_uploader("Gene set GMT (optional)", type=["gmt"])
 
-    # ---------------- NEW: Multi-dataset mode (expression+meta per dataset) ----------------
+    with st.expander("Advanced settings"):
+        out_dir = st.text_input("Output directory", "out")
+        pca_topk = st.number_input("Top variable genes for PCA", min_value=500, max_value=50000, value=5000, step=500)
+        do_nonlinear = st.checkbox("Make UMAP/t-SNE (if available)", value=True)
+
+    # Multi-dataset (manual)
     if mode == "Multiple datasets (each has its own metadata)":
         with st.expander("1) Upload Datasets (each has its own expression + metadata)"):
             n_ds = st.number_input("How many datasets?", min_value=2, max_value=12, value=3, step=1)
@@ -348,7 +232,7 @@ if source == "Manual upload":
                     c1, c2, c3 = st.columns(3)
                     with c1:
                         id_cols_i = st.text_input(f"ID columns {i+1}",
-                                                  "sample,Sample,Id,ID,id,CleanID,sample_id,Sample_ID,SampleID,bare_id",
+                                                  "sample,Sample,Id,ID,id,CleanID,sample_id,Sample_ID,SampleID",
                                                   key=f"idcols_{i}")
                     with c2:
                         grp_cols_i = st.text_input(f"GROUP columns {i+1}",
@@ -372,9 +256,34 @@ if source == "Manual upload":
                                              value=3000, step=250,
                                              help="If overlap ≥ this, datasets are combined; otherwise analyzed separately.")
 
-    run = safe_button("🚀 Run Harmonization", type="primary", use_container_width=True)
+# =========================
+# Drive Ingestion Controls
+# =========================
+if input_source == "Google Drive (deg_data)":
+    st.subheader("🔗 Google Drive Ingestion (deg_data)")
+    st.caption("Provide a **Service Account JSON** and share your deg_data folder with its `client_email` as **Viewer**.")
+    json_file = st.file_uploader("Service Account JSON", type=["json"], key="sa_json")
+    drive_link = st.text_input("deg_data root folder link (or ID)", value="", help="Example: https://drive.google.com/drive/folders/<ID>")
+    disease_query = st.text_input("Disease keywords (space or comma separated)", value="",
+                                  help="e.g., acute, myeloid, leukemia — matches any token against disease folder names")
+    out_dir = st.text_input("Output directory", "out")
+    pca_topk = st.number_input("Top variable genes for PCA", min_value=500, max_value=50000, value=5000, step=500, key="pca_topk_drive")
+    do_nonlinear = st.checkbox("Make UMAP/t-SNE (if available)", value=True, key="do_nonlinear_drive")
+    combine_thresh = st.number_input("Minimum overlapping genes to combine (multi-dataset)", min_value=500, max_value=100000,
+                                     value=3000, step=250, key="combine_drive")
 
-    if run:
+# =========================
+# Run Button
+# =========================
+if input_source == "Manual upload":
+    run = safe_button("🚀 Run Harmonization", type="primary", use_container_width=True)
+else:
+    run = safe_button("🔎 Scan Drive & Run", type="primary", use_container_width=True)
+
+if run:
+    _clear_caches()
+    if input_source == "Manual upload":
+        # ----- Manual paths (unchanged core logic) -----
         if mode == "Multiple datasets (each has its own metadata)":
             if not multi_datasets or len(multi_datasets) < 2:
                 st.error("Please provide at least two datasets (each with expression + metadata)."); st.stop()
@@ -392,97 +301,197 @@ if source == "Manual upload":
                     kwargs_multi["out_root"] = os.path.join(out_dir, run_id)
                     multi_out = hz.run_pipeline_multi(**kwargs_multi)
                     st.session_state.run_id = run_id
+                    # Keep ALL runs; default to combined if available
                     st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
                     st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
                     st.session_state.multi = multi_out
-                    try:
-                        st.cache_data.clear(); st.cache_resource.clear()
-                    except Exception:
-                        pass
+                _clear_caches()
             except Exception as e:
                 st.error(f"Multi-dataset run failed: {e}")
                 st.stop()
         else:
-            if source == "Manual upload" and mode != "Multiple datasets (each has its own metadata)":
-                if mode in ("Single expression matrix", "Multiple files (one per group)") and not st.session_state.get("multi"):
-                    if "meta" not in locals() and st.session_state.get("drive_plan") is None:
-                        # local var guard - the 'meta' var name is used later only if metadata_file exists
-                        pass
+            if not metadata_file:
+                st.error("Please upload a metadata file."); st.stop()
 
-            if mode != "Multiple datasets (each has its own metadata)":
-                # Need metadata for single/multi-files
-                # (Drive mode handles metadata inside plan)
-                # In Manual flow, we require metadata_file:
-                if source == "Manual upload" and not st.session_state.get("multi"):
-                    if 'metadata_file' in locals() and metadata_file:
-                        pass
-                    else:
-                        st.error("Please upload a metadata file."); st.stop()
+            kwargs = {
+                "metadata_file": io.BytesIO(metadata_file.getvalue()),
+                "metadata_name_hint": metadata_file.name,
+                "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip()],
+                "metadata_group_cols": [c.strip() for c in grp_cols.split(",") if c.strip()],
+                "metadata_batch_col": (batch_col.strip() or None),  # None => auto-detect
+                "out_root": out_dir,
+                "pca_topk_features": int(pca_topk),
+                "make_nonlinear": do_nonlinear,
+            }
 
-                kwargs = {
-                    "metadata_file": io.BytesIO(metadata_file.getvalue()),
-                    "metadata_name_hint": metadata_file.name,
-                    "metadata_id_cols": [c.strip() for c in id_cols.split(",") if c.strip()],
-                    "metadata_group_cols": [c.strip() for c in grp_cols.split(",") if c.strip()],
-                    "metadata_batch_col": (batch_col.strip() or None),  # None => auto-detect
-                    "out_root": out_dir,
-                    "pca_topk_features": int(pca_topk),
-                    "make_nonlinear": do_nonlinear,
-                }
+            gmt_path = None
+            if gmt_file:
+                tmpdir = tempfile.mkdtemp()
+                gmt_path = os.path.join(tmpdir, gmt_file.name)
+                with open(gmt_path, "wb") as fh: fh.write(gmt_file.getvalue())
+                kwargs["gsea_gmt"] = gmt_path
 
-                gmt_path = None
-                if 'gmt_file' in locals() and gmt_file:
-                    tmpdir = tempfile.mkdtemp()
-                    gmt_path = os.path.join(tmpdir, gmt_file.name)
-                    with open(gmt_path, "wb") as fh: fh.write(gmt_file.getvalue())
-                    kwargs["gsea_gmt"] = gmt_path
+            if mode == "Multiple files (one per group)":
+                groups = {}
+                if normal_file: groups["First"] = io.BytesIO(normal_file.getvalue())
+                if atypia_file: groups["Second"] = io.BytesIO(atypia_file.getvalue())
+                if hpv_pos_file: groups["Third"] = io.BytesIO(hpv_pos_file.getvalue())
+                if hpv_neg_file: groups["Fourth"] = io.BytesIO(hpv_neg_file.getvalue())
+                if not groups:
+                    st.error("Please upload at least one expression file."); st.stop()
+                kwargs["group_to_file"] = groups
+            else:
+                if not single_expr_file:
+                    st.error("Please upload the expression matrix."); st.stop()
+                kwargs["single_expression_file"] = io.BytesIO(single_expr_file.getvalue())
+                kwargs["single_expression_name_hint"] = single_expr_file.name
 
-                if mode == "Multiple files (one per group)":
-                    groups = {}
-                    if normal_file: groups["First"] = io.BytesIO(normal_file.getvalue())
-                    if atypia_file: groups["Second"] = io.BytesIO(atypia_file.getvalue())
-                    if hpv_pos_file: groups["Third"] = io.BytesIO(hpv_pos_file.getvalue())
-                    if hpv_neg_file: groups["Fourth"] = io.BytesIO(hpv_neg_file.getvalue())
-                    if not groups:
-                        st.error("Please upload at least one expression file."); st.stop()
-                    kwargs["group_to_file"] = groups
-                else:
-                    if not single_expr_file:
-                        st.error("Please upload the expression matrix."); st.stop()
-                    kwargs["single_expression_file"] = io.BytesIO(single_expr_file.getvalue())
-                    kwargs["single_expression_name_hint"] = single_expr_file.name
+            try:
+                with st.spinner("Running harmonization..."):
+                    run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
+                    kwargs["out_root"] = os.path.join(out_dir, run_id)
+                    out = hz.run_pipeline(**kwargs)
+                    st.session_state.run_id = run_id
+                    st.session_state.out = out
+                    st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
+                _clear_caches()
+            except Exception as e:
+                st.error(f"Run failed: {e}")
+                st.stop()
+    else:
+        # ----- Drive ingestion path -----
+        if not json_file:
+            st.error("Please upload your Service Account JSON."); st.stop()
+        if not drive_link.strip():
+            st.error("Please paste your deg_data root folder link or ID."); st.stop()
 
-                try:
-                    with st.spinner("Running harmonization..."):
-                        run_id = _dt.datetime.now().strftime("run_%Y%m%d_%H%M%S")
-                        kwargs["out_root"] = os.path.join(out_dir, run_id)
-                        out = hz.run_pipeline(**kwargs)
-                        st.session_state.run_id = run_id
-                        st.session_state.out = out
-                        st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
-                        try:
-                            st.cache_data.clear(); st.cache_resource.clear()
-                        except Exception:
-                            pass
-                except Exception as e:
-                    st.error(f"Run failed: {e}")
-                    if 'gmt_file' in locals() and gmt_file:
-                        shutil.rmtree(os.path.dirname(gmt_path), ignore_errors=True)
-                    st.stop()
+        try:
+            with st.spinner("Connecting to Drive and building ingestion plan..."):
+                drv = din.DriveClient.from_service_account_bytes(json_file.getvalue())
+                plan = din.make_ingest_plan(drv, drive_link.strip(), disease_query=disease_query.strip())
+                st.session_state.last_plan = plan
+        except Exception as e:
+            st.error(f"Drive ingest failed: {e}")
+            st.stop()
+
+        mode = plan.get("mode")
+        if mode == "none":
+            st.warning(plan.get("reason", "No content found."))
+            st.stop()
+
+        # Build kwargs from plan
+        out_root = os.path.join(out_dir, _dt.datetime.now().strftime("drive_%Y%m%d_%H%M%S"))
+        if mode == "single":
+            single = plan["single"]
+            kwargs = {
+                "single_expression_file": single["counts"],
+                "single_expression_name_hint": single["counts_name"],
+                "metadata_file": single["meta"],
+                "metadata_name_hint": single["meta_name"],
+                "metadata_id_cols": ["sample","Sample","Id","ID","id","CleanID","sample_id","Sample_ID","SampleID","bare_id"],
+                "metadata_group_cols": ["group","Group","condition","Condition","phenotype","Phenotype"],
+                "metadata_batch_col": None,
+                "out_root": out_root,
+                "pca_topk_features": int(pca_topk),
+                "make_nonlinear": do_nonlinear,
+            }
+            with st.spinner(f"Running SINGLE dataset from Drive: {single.get('label','dataset')}"):
+                out = hz.run_pipeline(**kwargs)
+                st.session_state.run_id = os.path.basename(out_root)
+                st.session_state.out = out
+                st.session_state.run_token = f"{st.session_state.run_id}-{_dt.datetime.now().timestamp():.0f}"
+                st.session_state.multi = None
+            _clear_caches()
+
+        elif mode == "multi_files_one_meta":
+            groups = plan["groups"]
+            meta = plan["meta"]
+            kwargs = {
+                "group_to_file": {k: v[0] for k, v in groups.items()},
+                "metadata_file": meta,
+                "metadata_name_hint": plan["meta_name"],
+                "metadata_id_cols": ["sample","Sample","Id","ID","id","CleanID","sample_id","Sample_ID","SampleID","bare_id"],
+                "metadata_group_cols": ["group","Group","condition","Condition","phenotype","Phenotype"],
+                "metadata_batch_col": None,
+                "out_root": out_root,
+                "pca_topk_features": int(pca_topk),
+                "make_nonlinear": do_nonlinear,
+            }
+            with st.spinner(f"Running MULTI-FILES-ONE-META from Drive: {plan.get('disease','disease')} / {plan.get('prep_path','prep')}"):
+                out = hz.run_pipeline(**kwargs)
+                st.session_state.run_id = os.path.basename(out_root)
+                st.session_state.out = out
+                st.session_state.run_token = f"{st.session_state.run_id}-{_dt.datetime.now().timestamp():.0f}"
+                st.session_state.multi = None
+            _clear_caches()
+
+        elif mode == "multi_dataset":
+            ds = plan["datasets"]
+            datasets_arg = []
+            for i, d in enumerate(ds, 1):
+                datasets_arg.append({
+                    "geo": d["label"],
+                    "counts": d["counts"],
+                    "counts_name": d["counts_name"],
+                    "meta": d["meta"],
+                    "meta_name": d["meta_name"],
+                    "meta_id_cols": ["sample","Sample","Id","ID","id","CleanID","sample_id","Sample_ID","SampleID","bare_id"],
+                    "meta_group_cols": ["group","Group","condition","Condition","phenotype","Phenotype"],
+                    "meta_batch_col": None,
+                })
+            kwargs_multi = {
+                "datasets": datasets_arg,
+                "attempt_combine": True,
+                "combine_minoverlap_genes": int(combine_thresh),
+                "out_root": out_root,
+                "pca_topk_features": int(pca_topk),
+                "make_nonlinear": do_nonlinear,
+            }
+            with st.spinner(f"Running MULTI-DATASET from Drive: {len(datasets_arg)} preps"):
+                multi_out = hz.run_pipeline_multi(**kwargs_multi)
+                st.session_state.run_id = os.path.basename(out_root)
+                st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
+                st.session_state.run_token = f"{st.session_state.run_id}-{_dt.datetime.now().timestamp():.0f}"
+                st.session_state.multi = multi_out
+            _clear_caches()
+        else:
+            st.error(f"Unexpected plan mode: {mode}")
+            st.stop()
 
 # =========================
-# RESULTS (always visible)
+# RESULTS UI (enhanced for multi-dataset)
 # =========================
 st.subheader("Results")
 
-# Rebuild tabs (added Multi Summary + Presenter Mode)
-tabs = st.tabs(["Overview","QC","PCA & Embeddings","DE & GSEA","Outliers","Files","Multi-dataset Summary","Presenter Mode"])
-out_curr = st.session_state.get("out"); run_id = st.session_state.get("run_id")
+# Helper: load a run dict (out) by reference key
+def _run_out_dict(run_dict_or_path):
+    return run_dict_or_path
+
+# NEW: selector for multi runs (view combined OR per-dataset)
+multi_ctx = st.session_state.get("multi")
+view_selector = None
+selected_key = None
+if multi_ctx and isinstance(multi_ctx, dict) and multi_ctx.get("runs"):
+    run_keys = list(multi_ctx["runs"].keys())
+    options = ["[Combined]"] if multi_ctx.get("combined") else []
+    options += run_keys
+    st.info("Multi-dataset results detected. You can inspect **combined** results or any **individual dataset**.")
+    selected_key = st.selectbox("View which results?", options, index=0)
+    if selected_key == "[Combined]":
+        out_curr = multi_ctx.get("combined") or st.session_state.get("out")
+    else:
+        out_curr = multi_ctx["runs"][selected_key]
+else:
+    out_curr = st.session_state.get("out")
+
+# Build tabs
+tabs = st.tabs(["Overview","QC","PCA & Embeddings","DE & GSEA","Outliers","Files","Multi-dataset Summary","Presenter Mode","Comparisons"])
+run_id = st.session_state.get("run_id")
 
 # ---- Overview
 with tabs[0]:
     if not out_curr:
-        st.info("No run loaded yet. Upload data or fetch from Drive, then run.")
+        st.info("No run loaded yet. Upload or scan Drive to start.")
     else:
         report = {}
         try:
@@ -509,7 +518,6 @@ with tabs[0]:
             st.metric("Silhouette (batch)", f'{sil_batch:.2f}' if isinstance(sil_batch, (int, float)) else "—")
             st.markdown('<div class="smallcaps">Lower is better</div></div>', unsafe_allow_html=True)
 
-        # Extra diagnostics to make PCA issues obvious
         with st.expander("Diagnostics"):
             st.write({
                 "harmonization_mode": qc.get("harmonization_mode"),
@@ -649,7 +657,7 @@ with tabs[5]:
             except Exception as e:
                 st.warning(f"Could not open ZIP for download: {e}")
 
-# ---- Multi-dataset Summary
+# ---- Multi-dataset Summary (existing + kept)
 with tabs[6]:
     multi = st.session_state.get("multi")
     if not multi:
@@ -692,7 +700,8 @@ with tabs[6]:
                 "drug_targets_analysis.csv",
                 "final_analysis_summary.csv",
             ]
-            for f in files:
+            cols = st.columns(2)
+            for i, f in enumerate(files):
                 p = os.path.join(meta_dir, f)
                 if os.path.exists(p):
                     with open(p, "rb") as fh:
@@ -704,7 +713,7 @@ with tabs[6]:
                                      file_name="harmonization_results.zip", mime="application/zip",
                                      use_container_width=True, key=f"dl_zip_multi__{run_id}")
 
-# ---- Presenter Mode
+# ---- Presenter Mode (kept)
 with tabs[7]:
     st.markdown("### 🎤 Presenter Mode")
     st.caption("A concise, visual summary for stakeholders. (Auto-populates after a multi-dataset run.)")
@@ -722,14 +731,13 @@ with tabs[7]:
         combined = dec.get("combined", False)
 
         met_csv = os.path.join(meta_dir, "meta_analysis_results.csv") if meta_dir else None
-        sig_count = up_count = 0
+        sig_count = 0
         top_rows = []
         if met_csv and os.path.exists(met_csv):
             try:
                 mdf = pd.read_csv(met_csv, index_col=0)
                 sig = mdf[mdf["q_meta"] < 0.10]
                 sig_count = int(sig.shape[0])
-                up_count = int(((sig["meta_log2FC_proxy"] > 0) & (sig["consistency"] >= 0.6)).sum())
                 top_rows = mdf.sort_values("q_meta").head(10)
             except Exception:
                 pass
@@ -745,9 +753,97 @@ with tabs[7]:
 
         if len(top_rows):
             st.write("#### Top biomarker candidates (meta)")
-            st.dataframe(top_rows[["z_meta","p_meta","q_meta","consistent_dir","consistency","meta_log2FC_proxy"]], use_container_width=True)
+            st.dataframe(top_rows[["z_meta","p_meta","q_meta","consistent_dir","consistency","meta_log2FC_proxy"]],
+                         use_container_width=True)
 
         if summary_txt and os.path.exists(summary_txt):
             with open(summary_txt, "r") as fh:
                 st.write("#### Key Findings (ready to copy)")
                 st.code(fh.read(), language="markdown")
+
+# ---- NEW: Comparisons (pairwise similarities across datasets)
+with tabs[8]:
+    multi = st.session_state.get("multi")
+    if not multi or not multi.get("runs"):
+        st.info("Comparisons are available after a multi-dataset run.")
+    else:
+        st.write("### Pairwise comparisons between datasets")
+        runs = multi["runs"]
+
+        # 1) Basic stats
+        basic_rows = []
+        for name, r in runs.items():
+            try:
+                rep = json.load(open(r["report_json"], "r"))
+            except Exception:
+                rep = {}
+            shp = rep.get("shapes", {})
+            qc = rep.get("qc", {})
+            basic_rows.append({
+                "dataset": name,
+                "samples": shp.get("samples", None),
+                "genes": shp.get("genes", None),
+                "zero_fraction": qc.get("zero_fraction", None),
+                "silhouette_batch": qc.get("silhouette_batch", None),
+                "platform": qc.get("platform", None),
+            })
+        if basic_rows:
+            st.dataframe(pd.DataFrame(basic_rows).set_index("dataset"), use_container_width=True)
+
+        # 2) Gene overlap matrix
+        def load_genes(path):
+            try:
+                X = pd.read_csv(os.path.join(path, "expression_combined.tsv"), sep="\t", index_col=0)
+                return set(map(str, X.index))
+            except Exception:
+                return set()
+
+        gene_sets = {name: load_genes(r["outdir"]) for name, r in runs.items()}
+        ds_names = list(gene_sets.keys())
+        jacc = pd.DataFrame(index=ds_names, columns=ds_names, dtype=float)
+        inter = pd.DataFrame(index=ds_names, columns=ds_names, dtype=float)
+        for a, b in itertools.product(ds_names, ds_names):
+            A, B = gene_sets[a], gene_sets[b]
+            if not A or not B:
+                jacc.loc[a,b] = None
+                inter.loc[a,b] = None
+            else:
+                inter_set = len(A & B)
+                union_set = len(A | B)
+                inter.loc[a,b] = inter_set
+                jacc.loc[a,b] = inter_set / union_set if union_set else None
+        st.write("#### Gene overlap (intersection counts)")
+        st.dataframe(inter, use_container_width=True)
+        st.write("#### Jaccard index of gene overlap")
+        st.dataframe(jacc, use_container_width=True)
+
+        # 3) DE overlap (optional: Disease vs Control if found)
+        st.write("#### Overlap of top DE genes (if 'DE_Disease_vs_Control.tsv' exists)")
+        def top_de_genes(outdir, topn=200):
+            de_dir = os.path.join(outdir, "de")
+            target = os.path.join(de_dir, "DE_Disease_vs_Control.tsv")
+            if not os.path.exists(target):
+                # fallback: pick any DE file
+                cands = [f for f in os.listdir(de_dir)] if os.path.isdir(de_dir) else []
+                cands = [f for f in cands if f.startswith("DE_") and f.endswith(".tsv")]
+                if not cands:
+                    return set()
+                target = os.path.join(de_dir, cands[0])
+            try:
+                df = pd.read_csv(target, sep="\t", index_col=0).sort_values("qval").head(topn)
+                return set(map(str, df.index))
+            except Exception:
+                return set()
+
+        top_sets = {name: top_de_genes(r["outdir"]) for name, r in runs.items()}
+        de_overlap = pd.DataFrame(index=ds_names, columns=ds_names, dtype=float)
+        for a, b in itertools.product(ds_names, ds_names):
+            A, B = top_sets[a], top_sets[b]
+            if not A or not B:
+                de_overlap.loc[a,b] = None
+            else:
+                de_overlap.loc[a,b] = len(A & B)
+        st.dataframe(de_overlap, use_container_width=True)
+
+        st.caption("Tip: Higher intersections and Jaccard suggest stronger similarity across datasets. "
+                   "Meta-analysis above already aggregates signals from all datasets.")
