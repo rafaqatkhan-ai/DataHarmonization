@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# harmonizer.py — single-dataset pipeline + Multi-GEO wrapper + meta-analysis + presenter assets
-import os, re, io, json, warnings, zipfile
+# harmonizer.py — single-dataset pipeline + Multi-GEO wrapper + meta-analysis + Drive-aware outputs
+import os, re, io, json, warnings, zipfile, shutil
 from typing import Dict, Tuple, List, Iterable, Optional
 import numpy as np
 import pandas as pd
@@ -97,6 +97,39 @@ def _as_bytesio_seekable(x):
     if bio is not None: bio.seek(0)
     return bio
 
+def _is_pathlike(x) -> bool:
+    return isinstance(x, (str, os.PathLike)) and len(str(x).strip()) > 0
+
+def _try_abspath(x: Optional[str]) -> Optional[str]:
+    try:
+        return os.path.abspath(str(x)) if _is_pathlike(x) else None
+    except Exception:
+        return None
+
+def _dataset_dir_from_inputs(single_expression_file, single_expression_name_hint, group_to_file) -> Optional[str]:
+    """
+    Best-effort: find a dataset folder to co-locate outputs.
+    Priority:
+      1) directory of single_expression_file (if path-like)
+      2) directory of single_expression_name_hint (if path-like string with dirs)
+      3) for multi-group runs: directory of the first group's file path-like
+    """
+    cand = _try_abspath(single_expression_file)
+    if cand and os.path.isfile(cand):
+        return os.path.dirname(cand)
+
+    cand2 = _try_abspath(single_expression_name_hint)
+    if cand2 and os.path.exists(cand2):  # if a path to a file/folder
+        return cand2 if os.path.isdir(cand2) else os.path.dirname(cand2)
+
+    if group_to_file:
+        for _, f in group_to_file.items():
+            p = _try_abspath(f)
+            if p and os.path.isfile(p):
+                return os.path.dirname(p)
+
+    return None
+
 # ---------------- IO ----------------
 def read_expression_any(bytes_or_path, name_hint: Optional[str] = None, group_name: Optional[str] = None,
                         assume_first_col_is_gene: bool = True) -> pd.DataFrame:
@@ -158,6 +191,7 @@ def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFra
     is_pathlike = isinstance(metadata_obj, (str, os.PathLike))
     suffix = (os.path.splitext(name_hint)[1].lower() if name_hint
               else (os.path.splitext(str(metadata_obj))[1].lower() if is_pathlike else ""))
+
     if suffix in (".xlsx", ".xls"):
         return (pd.read_excel(metadata_obj, engine="openpyxl")
                 if is_pathlike else pd.read_excel(_as_bytesio_seekable(metadata_obj), engine="openpyxl"))
@@ -165,15 +199,22 @@ def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFra
     def _peek_bytes(obj, n=4096) -> bytes:
         try:
             if isinstance(obj, (str, os.PathLike)):
-                with open(obj, "rb") as fh: return fh.read(n)
-            bio = _as_bytesio_seekable(obj); pos = bio.tell(); b = bio.read(n); bio.seek(pos); return b
+                with open(obj, "rb") as fh:
+                    return fh.read(n)
+            bio = _as_bytesio_seekable(obj)
+            pos = bio.tell()
+            b = bio.read(n)
+            bio.seek(pos)
+            return b
         except Exception:
             return b""
 
     def _sniff_sep(obj) -> str | None:
         sample = _peek_bytes(obj, 4096).decode(errors="ignore")
-        if "\t" in sample and "," not in sample: return "\t"
-        if "," in sample and "\t" not in sample: return ","
+        if "\t" in sample and "," not in sample:
+            return "\t"
+        if "," in sample and "\t" not in sample:
+            return ","
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=[",", "\t", ";", "|"])
             return dialect.delimiter
@@ -181,19 +222,24 @@ def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFra
             return None
 
     def _read_text(obj):
-        try: return pd.read_csv(obj, sep=None, engine="python")
-        except Exception: pass
+        try:
+            return pd.read_csv(obj, sep=None, engine="python")
+        except Exception:
+            pass
         sep = _sniff_sep(obj)
         if sep:
-            try: return pd.read_csv(obj, sep=sep)
-            except Exception: pass
+            try:
+                return pd.read_csv(obj, sep=sep)
+            except Exception:
+                pass
         for sep in [",", "\t", ";", "|"]:
-            try: return pd.read_csv(obj, sep=sep)
-            except Exception: continue
+            try:
+                return pd.read_csv(obj, sep=sep)
+            except Exception:
+                continue
         return (pd.read_excel(obj, engine="openpyxl")
                 if isinstance(obj, (str, os.PathLike))
                 else pd.read_excel(_as_bytesio_seekable(obj), engine="openpyxl"))
-
     return _read_text(metadata_obj if is_pathlike else _as_bytesio_seekable(metadata_obj))
 
 # ---------------- Batch detection ----------------
@@ -282,7 +328,8 @@ def calc_libsize_cv(counts: pd.DataFrame) -> float:
     return float(sd / (mu if mu > 0 else 1.0))
 
 def is_counts_like(X: pd.DataFrame) -> bool:
-    vals = X.values.ravel(); vals = vals[np.isfinite(vals)]
+    vals = X.values.ravel()
+    vals = vals[np.isfinite(vals)]
     if vals.size == 0: return False
     if np.min(vals) < 0: return False
     int_frac = np.mean(np.isclose(vals, np.round(vals)))
@@ -290,7 +337,8 @@ def is_counts_like(X: pd.DataFrame) -> bool:
 
 def cpm_normalize(counts: pd.DataFrame) -> pd.DataFrame:
     C = counts.clip(lower=0).astype(float)
-    lib = C.sum(axis=0).replace(0, np.nan)
+    lib = C.sum(axis=0)
+    lib = lib.replace(0, np.nan)
     CPM = (C * 1e6).div(lib, axis=1).fillna(0.0)
     return CPM
 
@@ -308,7 +356,8 @@ def _tmm_factor(ref: np.ndarray, tgt: np.ndarray, ref_lib: float, tgt_lib: float
         return (x >= lo) & (x <= hi)
     keep = _trim(M, trim_m) & _trim(A, trim_a)
     if np.sum(keep) < 5: return 1.0
-    f = np.average(M[keep], weights=w[keep])
+    M_k, w_k = M[keep], w[keep]
+    f = np.average(M_k, weights=w_k)
     return float(2.0 ** f)
 
 def tmm_normalize(counts: pd.DataFrame) -> pd.DataFrame:
@@ -319,15 +368,17 @@ def tmm_normalize(counts: pd.DataFrame) -> pd.DataFrame:
     ref_lib = float(libs[ref_col]) if float(libs[ref_col]) > 0 else 1.0
     factors = {}
     for col in C.columns:
+        tgt = C[col].values
+        tgt_lib = float(libs[col]) if float(libs[col]) > 0 else 1.0
         if col == ref_col:
             factors[col] = 1.0
         else:
             try:
-                tgt = C[col].values; tgt_lib = float(libs[col]) if float(libs[col]) > 0 else 1.0
                 factors[col] = _tmm_factor(ref, tgt, ref_lib, tgt_lib)
             except Exception:
                 factors[col] = 1.0
-    eff_lib = (libs * pd.Series(factors)).replace(0, np.nan)
+    f = pd.Series(factors)
+    eff_lib = (libs * f).replace(0, np.nan)
     TMM = (C * 1e6).div(eff_lib, axis=1).fillna(0.0)
     return TMM
 
@@ -562,6 +613,7 @@ def nonlinear_embedding_plots(Xc, meta, figdir, harmonization_mode, make=True):
         except Exception: pass
     if Emb is None and _HAVE_TSNE:
         try:
+            from sklearn.manifold import TSNE
             perplexity = max(5, min(30, (Xp_embed.shape[0]-1)//3))
             tsne = TSNE(n_components=2, init="pca", learning_rate="auto",
                         perplexity=perplexity, n_iter=1000, random_state=42)
@@ -664,14 +716,57 @@ def _z_from_p_two_sided(p, sign):
 
 def _stouffer_meta(z_list, w_list=None):
     z = np.asarray(z_list, float)
-    if w_list is None: w = np.ones_like(z)
-    else: w = np.asarray(w_list, float)
+    if w_list is None:
+        w = np.ones_like(z)
+    else:
+        w = np.asarray(w_list, float)
     if z.size == 0: return np.nan
     z_meta = (w * z).sum() / np.sqrt((w**2).sum())
     return z_meta
 
 def _bh(q):
     return _bh_fdr(q)
+
+# ---------------- Drive-aware OUTDIR selection ----------------
+def _choose_outdir(single_expression_file,
+                   single_expression_name_hint,
+                   group_to_file,
+                   out_root: Optional[str],
+                   out_mode: str,
+                   drive_data_prep_dir: Optional[str]) -> str:
+    """
+    Decide where to write outputs.
+    - out_mode == "co_locate": write to <dataset_dir>/harmonized (dataset_dir = folder of the input counts file)
+    - else: use out_root (fallback to cwd/out)
+    If drive_data_prep_dir is provided, we still favor the actual dataset folder derived from inputs.
+    """
+    if out_mode == "co_locate":
+        ds_dir = _dataset_dir_from_inputs(single_expression_file, single_expression_name_hint, group_to_file)
+        if ds_dir:
+            return os.path.join(ds_dir, "harmonized")
+        # Fallback: put under drive_data_prep_dir if given
+        if drive_data_prep_dir:
+            os.makedirs(drive_data_prep_dir, exist_ok=True)
+            return os.path.join(drive_data_prep_dir, "harmonized")
+    # default mode
+    if out_root:
+        return out_root
+    return os.path.join(os.getcwd(), "out")
+
+def _write_normalization_note(path: str, normalization: str, reason: str,
+                              lib_cv: float, zero_fraction: float, counts_like: bool):
+    txt = [
+        "Normalization Decision",
+        "----------------------",
+        f"normalization: {normalization}",
+        f"reason: {reason}",
+        f"library_size_cv: {lib_cv:.6f}",
+        f"zero_fraction: {zero_fraction:.4%}",
+        f"counts_like: {counts_like}",
+        ""
+    ]
+    with open(path, "w") as fh:
+        fh.write("\n".join(txt))
 
 # ---------------- Main single-dataset pipeline ----------------
 def run_pipeline(
@@ -683,21 +778,31 @@ def run_pipeline(
     metadata_id_cols: List[str] = ["Id","ID","id","CleanID","sample","Sample"],
     metadata_group_cols: List[str] = ["group","Group","condition","Condition","phenotype","Phenotype"],
     metadata_batch_col: Optional[str] = None,
-    out_root: str = "out",
+    out_root: Optional[str] = None,
     fig_subdir: str = "figs",
     min_batch_size_for_combat: int = 2,
     pca_topk_features: int = 5000,
     make_nonlinear: bool = True,
     gsea_gmt: Optional[str] = None,
+    # NEW:
+    out_mode: str = "co_locate",                # "co_locate" or "default"
+    drive_data_prep_dir: Optional[str] = None,  # or set GDRIVE_DATA_PREP_DIR env
 ) -> Dict[str, str]:
 
     if metadata_file is None:
         raise ValueError("metadata_file is required.")
 
-    OUTDIR = os.path.join(out_root)
+    drive_data_prep_dir = drive_data_prep_dir or os.environ.get("GDRIVE_DATA_PREP_DIR")
+    # Decide OUTDIR (and ensure a sibling HARMONIZED folder)
+    OUTDIR = _choose_outdir(single_expression_file, single_expression_name_hint, group_to_file,
+                            out_root, out_mode, drive_data_prep_dir)
+    HARM_DIR = OUTDIR  # when co_locate, OUTDIR is already .../<dataset>/harmonized
+    # If user passed a custom out_root with default mode, still keep a co-located harmonized subfolder inside OUTDIR.
+    if out_mode != "co_locate":
+        HARM_DIR = os.path.join(OUTDIR, "harmonized")
+
     FIGDIR = os.path.join(OUTDIR, fig_subdir)
     REPORT_DIR = os.path.join(OUTDIR, "report")
-    HARM_DIR = os.path.join(OUTDIR, "harmonized")
     os.makedirs(FIGDIR, exist_ok=True); os.makedirs(REPORT_DIR, exist_ok=True); os.makedirs(HARM_DIR, exist_ok=True)
 
     # 1) expression
@@ -793,56 +898,52 @@ def run_pipeline(
     # 3) detect type
     dtype, platform, diags = detect_data_type_and_platform(combined_expr)
 
-    # ---- Precompute indicators for normalization decision (for report) ----
-    libsize_cv = calc_libsize_cv(combined_expr)
-    zero_fraction_all = float((combined_expr == 0).sum().sum()) / float(combined_expr.size) if combined_expr.size else 0.0
-    counts_like_flag = is_counts_like(combined_expr)
+    # 4) --- NORMALIZATION SELECTION (auto) ---
+    normalization = "log2(counts+1)"
+    normalization_reason = "default"
+    counts_like = is_counts_like(combined_expr)
+    lib_cv = calc_libsize_cv(combined_expr) if counts_like else 0.0
+    zero_fraction = float((combined_expr == 0).sum().sum()) / float(combined_expr.size) if combined_expr.size else 0.0
 
-    # 4) --- NORMALIZATION SELECTION ---
-    # Rules:
-    #   If CV(library sizes) >= 0.30  -> TMM
-    #   Else if zero_fraction > 0.25  -> CPM
-    #   Else                          -> log2(counts+1)
-    normalization = "log2_counts_plus1"
-    normalization_reason = "Default path"
-    expr_log2 = None
-
-    if counts_like_flag:
-        if libsize_cv >= 0.30:
+    if counts_like:
+        if lib_cv >= 0.30:
             TMM = tmm_normalize(combined_expr)
             expr_log2 = np.log2(TMM + 1.0)
             normalization = "TMM_then_log2"
-            normalization_reason = f"CV(library sizes)={libsize_cv:.3f} \u2265 0.30"
-        elif zero_fraction_all > 0.25:
+            normalization_reason = f"Library size CV={lib_cv:.2f} ≥ 0.30"
+        elif zero_fraction > 0.25:
             CPM = cpm_normalize(combined_expr)
             expr_log2 = np.log2(CPM + 1.0)
             normalization = "CPM_then_log2"
-            normalization_reason = f"Zero fraction={zero_fraction_all:.2%} > 25%"
+            normalization_reason = f"Zero fraction={zero_fraction:.2%} > 25%"
         else:
             expr_log2 = np.log2(combined_expr + 1.0)
-            normalization = "log2_counts_plus1"
-            normalization_reason = f"CV={libsize_cv:.3f} < 0.30 and zeros={zero_fraction_all:.2%} \u2264 25%"
+            normalization = "log2(counts+1)"
+            normalization_reason = "Counts-like, CV<0.30 and zeros≤25%"
     else:
         expr_log2 = np.log2(combined_expr + 1.0)
-        normalization = "log2_expr_plus1_non_countslike"
-        normalization_reason = "Detected non-counts-like input (e.g., array/TPM); applied generic log2(x+1)"
+        normalization = "log2(expr+1)"
+        normalization_reason = "Non counts-like input"
 
     expr_log2 = expr_log2.replace([np.inf,-np.inf], np.nan)
-    print(f"[HARMONIZER] Normalization = {normalization} | {normalization_reason} | "
-          f"CV={libsize_cv:.3f}, zeros={zero_fraction_all:.2%}, counts-like={counts_like_flag}")
 
     # Keep z-score for diagnostics
     row_mean = expr_log2.mean(axis=1); row_std = expr_log2.std(axis=1, ddof=1).replace(0, np.nan)
     expr_z = expr_log2.sub(row_mean, axis=0).div(row_std, axis=0).replace([np.inf,-np.inf], np.nan).fillna(0)
 
     # 5) impute + filter
+    def row_mean_impute(X): return X.apply(lambda r: r.fillna(r.mean()), axis=1).fillna(0)
+    def drop_zero_variance(X):
+        var = X.var(axis=1, ddof=1).astype(float).fillna(0.0)
+        return X.loc[var > VAR_EPS]
+
     expr_imputed = drop_zero_variance(row_mean_impute(expr_log2))
     gene_vars = expr_imputed.var(axis=1)
     pos = gene_vars[gene_vars > 0]
     topk = min(pca_topk_features, len(pos)) if len(pos) > 0 else 0
     expr_filtered = expr_imputed.loc[pos.nlargest(topk).index] if topk > 0 else expr_imputed.iloc[0:0]
 
-    # 6) harmonize (ComBat or fallback)
+    # 6) harmonize
     meta["batch_collapsed"] = smart_batch_collapse(meta, min_batch_size_for_combat)
     if meta.index.duplicated().any():
         meta = _collapse_dupes_df_by_index(meta, how_num="median", keep="first")
@@ -867,7 +968,7 @@ def run_pipeline(
         expr_harmonized = _fallback_center(expr_filtered, meta_batch)
         mode = "fallback_center"
 
-    # 7) PCA (fail-soft)
+    # 7) PCA
     pca_df = pd.DataFrame(index=expr_harmonized.columns); kpi = {}; pca_skipped_reason = None
     pca_origin = "harmonized"
     try:
@@ -932,12 +1033,14 @@ def run_pipeline(
         heatmap_top_de(expr_log2, meta, df, k, os.path.join(OUTDIR, "figs"), topn=50)
 
     # 11) GSEA (optional) — stub
-    os.makedirs(os.path.join(OUTDIR, "gsea"), exist_ok=True)
+    gsea_dir = os.path.join(OUTDIR, "gsea"); os.makedirs(gsea_dir, exist_ok=True)
 
     # 12) Save outputs + richer report
-    # Save harmonized deliverables into per-dataset "harmonized" folder
-    expr_harmonized.to_csv(os.path.join(HARM_DIR, "expression_harmonized.tsv"), sep="\t")
-    pca_df.to_csv(os.path.join(HARM_DIR, "pca_scores.tsv"), sep="\t")
+    # Write main outputs in OUTDIR
+    expr_harmonized_path = os.path.join(OUTDIR, "expression_harmonized.tsv")
+    pca_scores_path = os.path.join(OUTDIR, "pca_scores.tsv")
+    expr_harmonized.to_csv(expr_harmonized_path, sep="\t")
+    pca_df.to_csv(pca_scores_path, sep="\t")
 
     genes_zero_std_after = int((expr_harmonized.std(axis=1, ddof=1).fillna(0) == 0).sum()) if expr_harmonized.shape[0] else 0
 
@@ -949,32 +1052,35 @@ def run_pipeline(
             "platform": platform,
             "normalization": normalization,
             "normalization_reason": normalization_reason,
-            "library_size_cv": float(libsize_cv),
-            "counts_like": bool(counts_like_flag),
+            "library_size_cv": float(lib_cv),
+            "counts_like": bool(counts_like),
             "genes_zero_std_after_harmonization": genes_zero_std_after,
             **kpi
         },
         "shapes": {"genes": int(combined_expr.shape[0]), "samples": int(combined_expr.shape[1])},
         "notes": {}
     }
-    if pca_skipped_reason: rep["notes"]["pca_skipped_reason"] = pca_skipped_reason
+    if 'pca_skipped_reason' in locals() and pca_skipped_reason:
+        rep["notes"]["pca_skipped_reason"] = pca_skipped_reason
 
-    # Write JSON to both: OUTDIR and REPORT_DIR (and copy into harmonized/)
-    with open(os.path.join(OUTDIR, "report.json"), "w") as f: json.dump(rep, f, indent=2)
-    with open(os.path.join(REPORT_DIR, "report.json"), "w") as f: json.dump(rep, f, indent=2)
-    with open(os.path.join(HARM_DIR, "report.json"), "w") as f: json.dump(rep, f, indent=2)
+    report_json_path = os.path.join(OUTDIR, "report.json")
+    with open(report_json_path, "w") as f:
+        json.dump(rep, f, indent=2)
 
-    # Also a tiny plaintext summary under harmonized/
-    with open(os.path.join(HARM_DIR, "normalization.txt"), "w") as f:
-        f.write(
-            f"Normalization: {normalization}\n"
-            f"Reason: {normalization_reason}\n"
-            f"Library size CV: {libsize_cv:.3f}\n"
-            f"Zero fraction: {zero_fraction_all:.2%}\n"
-            f"Counts-like: {counts_like_flag}\n"
-        )
+    # Human-friendly normalization note
+    _write_normalization_note(
+        os.path.join(OUTDIR, "normalization.txt"),
+        normalization, normalization_reason, lib_cv, zero_fraction, counts_like
+    )
 
-    # Zip bundle contains entire OUTDIR (figs, de, harmonized, report, etc.)
+    # Duplicate a compact "harmonized" view for easy consumption
+    os.makedirs(HARM_DIR, exist_ok=True)
+    shutil.copy2(expr_harmonized_path, os.path.join(HARM_DIR, "expression_harmonized.tsv"))
+    shutil.copy2(pca_scores_path, os.path.join(HARM_DIR, "pca_scores.tsv"))
+    shutil.copy2(report_json_path, os.path.join(HARM_DIR, "report.json"))
+    shutil.copy2(os.path.join(OUTDIR, "normalization.txt"), os.path.join(HARM_DIR, "normalization.txt"))
+
+    # Bundle (excluding bundle itself)
     zip_path = os.path.join(OUTDIR, "results_bundle.zip")
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for root, _, files in os.walk(OUTDIR):
@@ -987,15 +1093,17 @@ def run_pipeline(
         "outdir": OUTDIR,
         "harmonized_dir": HARM_DIR,
         "figdir": os.path.join(OUTDIR, "figs"),
-        "report_json": os.path.join(OUTDIR, "report.json"),
+        "report_json": report_json_path,
         "zip": zip_path
     }
 
 # ---------------- Multi-GEO wrapper + meta-analysis ----------------
 def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_thresh: float = 0.10) -> Dict:
+    import matplotlib.pyplot as plt
     os.makedirs(out_root, exist_ok=True)
     meta_dir = os.path.join(out_root, "meta"); os.makedirs(meta_dir, exist_ok=True)
 
+    # gather per-dataset DE
     per = {}
     for name, res in runs.items():
         de_dir = os.path.join(res["outdir"], "de")
@@ -1018,6 +1126,7 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
     if not per:
         return {"meta_dir": meta_dir, "n_datasets_with_de": 0}
 
+    # union of genes; compute meta stats
     genes = set().union(*[set(df.index.astype(str)) for df in per.values()])
     rows = []
     from scipy.stats import norm
@@ -1055,49 +1164,14 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
     meta_df["meta_log2FC_proxy"] = np.sign(meta_df["z_meta"].values) * np.array(med_abs, float)
 
     meta_df.sort_values("q_meta").to_csv(os.path.join(meta_dir, "meta_analysis_results.csv"))
-    ups = meta_df[(meta_df["q_meta"] < fdr_thresh) & (meta_df["meta_log2FC_proxy"] > 0) & (meta_df["consistency"] >= 0.6)]
-    ups.sort_values(["q_meta","consistency"], ascending=[True, False]).to_csv(os.path.join(meta_dir, "upregulated_genes_meta.csv"))
+    meta_df[(meta_df["q_meta"] < fdr_thresh) & (meta_df["meta_log2FC_proxy"] > 0) & (meta_df["consistency"] >= 0.6)] \
+        .sort_values(["q_meta","consistency"], ascending=[True, False]) \
+        .to_csv(os.path.join(meta_dir, "upregulated_genes_meta.csv"))
     meta_df.sort_values("q_meta").head(2000).to_csv(os.path.join(meta_dir, "deg_results_annotated.csv"))
     meta_df.sort_values("q_meta").head(500).to_csv(os.path.join(meta_dir, "drug_targets_analysis.csv"))
     meta_df.sort_values("q_meta").head(20).to_csv(os.path.join(meta_dir, "final_analysis_summary.csv"))
 
-    # Text + small PNG
-    total_genes = len(genes)
-    sig = int((meta_df["q_meta"] < fdr_thresh).sum())
-    up_consistent = int(((meta_df["q_meta"] < fdr_thresh) & (meta_df["meta_log2FC_proxy"] > 0) & (meta_df["consistency"] >= 0.6)).sum())
-    ds_list = ", ".join(sorted(per.keys()))
-    text_lines = [
-        "=== KEY FINDINGS FROM HARMONIZED META-ANALYSIS ===",
-        "",
-        "🎯 ANALYSIS SCOPE:",
-        f"   • Successfully harmonized {len(per)} datasets",
-        f"   • Total genes analyzed: {total_genes:,}",
-        f"   • Datasets: {ds_list}",
-        "",
-        "📊 STATISTICAL RESULTS:",
-        f"   • Significant genes (FDR < {fdr_thresh}): {sig:,}",
-        f"   • Consistently upregulated genes: {up_consistent:,}",
-        "   • Meta-analysis method: Signed Stouffer Z (gene-level)",
-        "",
-        "🧬 TOP BIOMARKER CANDIDATES:",
-    ]
-    top10 = meta_df.sort_values("q_meta").head(10)
-    i = 1
-    for g, r in top10.iterrows():
-        text_lines.append(f"    {i}. {g:<12} | LogFC*: {r['meta_log2FC_proxy']:+.3f} | FDR: {r['q_meta']:.2e} | Potential: {'High' if r['q_meta'] < 0.01 else 'Medium'}")
-        i += 1
-    text_lines += [
-        "",
-        "🔬 HARMONIZATION STRATEGY:",
-        "   ✓ Individual dataset analysis followed by meta-analysis",
-        "   ✓ Gene-level aggregation for cross-platform compatibility",
-        "   ✓ Consistency filtering (same direction across datasets)",
-        f"   ✓ Robust statistical thresholds (FDR < {fdr_thresh})",
-    ]
-    summary_txt = os.path.join(meta_dir, "final_analysis_summary.txt")
-    with open(summary_txt, "w") as fh:
-        fh.write("\n".join(text_lines))
-
+    # Simple hero PNG
     try:
         plt.figure(figsize=(10,6))
         top_plot = meta_df.sort_values("q_meta").head(10)[["q_meta"]].copy()
@@ -1106,15 +1180,15 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
         plt.xticks(x, top_plot.index.tolist(), rotation=60, ha="right", fontsize=9)
         plt.ylabel("-log10(FDR)")
         plt.title("Top Meta-analysis Signals (lower FDR is better)")
-        summary_png = os.path.join(meta_dir, "meta_top_signals.png")
+        summary_png = os.path.join(meta_dir, "diabetes_harmonized_analysis_comprehensive.png")
         _savefig(summary_png)
     except Exception:
-        summary_png = os.path.join(meta_dir, "meta_top_signals.png")
+        summary_png = os.path.join(meta_dir, "diabetes_harmonized_analysis_comprehensive.png")
 
     return {
         "meta_dir": meta_dir,
         "n_datasets_with_de": len(per),
-        "summary_txt_path": summary_txt,
+        "summary_txt_path": os.path.join(meta_dir, "final_analysis_summary.txt"),
         "summary_png_path": summary_png,
     }
 
@@ -1122,28 +1196,37 @@ def run_pipeline_multi(
     datasets: List[Dict],
     attempt_combine: bool = True,
     combine_minoverlap_genes: int = 3000,
-    out_root: str = "out/multi_geo",
+    out_root: Optional[str] = None,
     pca_topk_features: int = 5000,
     make_nonlinear: bool = True,
+    # NEW:
+    out_mode: str = "co_locate",
+    drive_data_prep_dir: Optional[str] = None,
 ) -> Dict:
-    os.makedirs(out_root, exist_ok=True)
+    """
+    For each dataset dict:
+      required keys: counts (path or bytes), meta (path or bytes)
+      optional: geo, counts_name, meta_name, meta_id_cols, meta_group_cols, meta_batch_col
+    """
+    os.makedirs(out_root or os.getcwd(), exist_ok=True)
     runs, exprs, metas = {}, {}, {}
 
-    # per-dataset runs
     for d in datasets:
-        name = d.get("geo") or f"DS{len(runs)+1}"
-        outdir = os.path.join(out_root, name)
+        name = d.get("geo") or d.get("name") or f"DS{len(runs)+1}"
+        # OUTDIR co-locates with this dataset's counts file by default
         res = run_pipeline(
-            single_expression_file=d["counts"],
+            single_expression_file=d.get("counts"),
             single_expression_name_hint=d.get("counts_name"),
-            metadata_file=d["meta"],
+            metadata_file=d.get("meta"),
             metadata_name_hint=d.get("meta_name"),
             metadata_id_cols=d.get("meta_id_cols") or ["Id","ID","id","sample","Sample","bare_id"],
             metadata_group_cols=d.get("meta_group_cols") or ["group","Group","condition","Condition","phenotype","Phenotype"],
             metadata_batch_col=d.get("meta_batch_col"),
-            out_root=outdir,
+            out_root=None if out_mode == "co_locate" else (os.path.join(out_root, name) if out_root else None),
             pca_topk_features=pca_topk_features,
             make_nonlinear=make_nonlinear,
+            out_mode=out_mode,
+            drive_data_prep_dir=drive_data_prep_dir,
         )
         runs[name] = res
         exprs[name] = pd.read_csv(os.path.join(res["outdir"], "expression_combined.tsv"), sep="\t", index_col=0)
@@ -1165,8 +1248,10 @@ def run_pipeline_multi(
             common = list(common)
             expr_joined, meta_joined = [], []
             for name, X in exprs.items():
-                Xi = X.loc[common]; expr_joined.append(Xi)
-                m = metas[name].copy(); m["dataset"] = name; meta_joined.append(m)
+                Xi = X.loc[common]
+                expr_joined.append(Xi)
+                m = metas[name].copy(); m["dataset"] = name
+                meta_joined.append(m)
             expr_all = pd.concat(expr_joined, axis=1, join="outer")
             meta_all = pd.concat(meta_joined, axis=0)
 
@@ -1179,7 +1264,9 @@ def run_pipeline_multi(
             meta_all = meta_all.reset_index().rename(columns={"index":"sample"})
             meta_all.to_csv(meta_buf, sep="\t", index=False); meta_buf.seek(0)
 
-            combined_out = os.path.join(out_root, "combined")
+            combined_out = os.path.join(out_root or os.getcwd(), "multi_geo_combined") \
+                if out_mode != "co_locate" else None
+
             combined = run_pipeline(
                 single_expression_file=expr_buf,
                 single_expression_name_hint="combined.tsv",
@@ -1191,9 +1278,11 @@ def run_pipeline_multi(
                 out_root=combined_out,
                 pca_topk_features=pca_topk_features,
                 make_nonlinear=make_nonlinear,
+                out_mode=out_mode,
+                drive_data_prep_dir=drive_data_prep_dir,
             )
 
-    meta = meta_analyze_disease_vs_control(runs, out_root=os.path.join(out_root, "meta_summary"))
+    meta = meta_analyze_disease_vs_control(runs, out_root=os.path.join(out_root or os.getcwd(), "meta_summary"))
 
     out = {
         "runs": runs,
