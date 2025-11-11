@@ -220,7 +220,6 @@ def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFra
     # Route text-like / unknown suffixes through the robust reader
     return _read_text(metadata_obj if is_pathlike else _as_bytesio_seekable(metadata_obj))
 
-
 # ---------------- Batch detection ----------------
 _BATCH_HINTS = [
     "batch","Batch","BATCH","center","Center","site","Site","location","Location",
@@ -297,6 +296,85 @@ def detect_data_type_and_platform(X: pd.DataFrame) -> Tuple[str, str, Dict]:
         platform = "Short-read RNA-seq (Illumina)"
     diags = {"zero_fraction": zero_frac, "value_range_approx": rng}
     return data_type, platform, diags
+
+# ---------------- NEW: Normalization helpers ----------------
+def calc_libsize_cv(counts: pd.DataFrame) -> float:
+    """Coefficient of variation of library sizes (column sums) on nonnegative matrix."""
+    C = counts.clip(lower=0).fillna(0.0)
+    lib = C.sum(axis=0).astype(float).values
+    if lib.size == 0 or np.all(lib == 0): return 0.0
+    mu = np.mean(lib); sd = np.std(lib, ddof=1) if lib.size > 1 else 0.0
+    return float(sd / (mu if mu > 0 else 1.0))
+
+def is_counts_like(X: pd.DataFrame) -> bool:
+    """Heuristic: nonnegative, many integers, wide dynamic range."""
+    vals = X.values.ravel()
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0: return False
+    if np.min(vals) < 0: return False
+    # integer-ish fraction
+    int_frac = np.mean(np.isclose(vals, np.round(vals)))
+    return (int_frac > 0.8)
+
+def cpm_normalize(counts: pd.DataFrame) -> pd.DataFrame:
+    C = counts.clip(lower=0).astype(float)
+    lib = C.sum(axis=0)
+    lib = lib.replace(0, np.nan)
+    CPM = (C * 1e6).div(lib, axis=1).fillna(0.0)
+    return CPM
+
+def _tmm_factor(ref: np.ndarray, tgt: np.ndarray, ref_lib: float, tgt_lib: float,
+                trim_m: float = 0.30, trim_a: float = 0.05, min_count: float = 1.0) -> float:
+    """Compute a single TMM scaling factor for tgt vs ref (trimmed mean of M)."""
+    # keep positive
+    g = (ref > 0) & (tgt > 0)
+    ref_g, tgt_g = ref[g], tgt[g]
+    if ref_g.size < 5: return 1.0
+    # M and A
+    M = np.log2((tgt_g / tgt_lib) / (ref_g / ref_lib))
+    A = 0.5 * np.log2((tgt_g / tgt_lib) * (ref_g / ref_lib))
+    # weights as in edgeR doc (approx)
+    w = 1.0 / ((tgt_g / tgt_lib) + (ref_g / ref_lib))
+    # trim extremes in M and A
+    def _trim(x, prop):
+        if prop <= 0: return np.ones_like(x, dtype=bool)
+        lo = np.quantile(x, prop/2.0)
+        hi = np.quantile(x, 1.0 - prop/2.0)
+        return (x >= lo) & (x <= hi)
+    keep = _trim(M, trim_m) & _trim(A, trim_a)
+    if np.sum(keep) < 5: return 1.0
+    M_k, w_k = M[keep], w[keep]
+    # weighted mean of M
+    f = np.average(M_k, weights=w_k)
+    # scaling factor on original scale
+    return float(2.0 ** f)
+
+def tmm_normalize(counts: pd.DataFrame) -> pd.DataFrame:
+    """Return TMM-normalized counts-per-million-like matrix (scale factors then rescale to common lib)."""
+    C = counts.clip(lower=0).astype(float)
+    libs = C.sum(axis=0).astype(float)
+    # choose reference as median library size column
+    ref_col = libs.sub(libs.median()).abs().sort_values().index[0]
+    ref = C[ref_col].values
+    ref_lib = float(libs[ref_col]) if float(libs[ref_col]) > 0 else 1.0
+    factors = {}
+    for col in C.columns:
+        tgt = C[col].values
+        tgt_lib = float(libs[col]) if float(libs[col]) > 0 else 1.0
+        if col == ref_col:
+            factors[col] = 1.0
+        else:
+            try:
+                factors[col] = _tmm_factor(ref, tgt, ref_lib, tgt_lib)
+            except Exception:
+                factors[col] = 1.0
+    f = pd.Series(factors)
+    # Effective library size = lib * factor
+    eff_lib = libs * f
+    eff_lib = eff_lib.replace(0, np.nan)
+    # Return TMM-normalized CPM-like values
+    TMM = (C * 1e6).div(eff_lib, axis=1).fillna(0.0)
+    return TMM
 
 # ---------------- Batch harmonization ----------------
 def _combat(expr_imputed: pd.DataFrame, meta_batch: pd.Series) -> Optional[pd.DataFrame]:
@@ -762,8 +840,40 @@ def run_pipeline(
     # 3) detect type
     dtype, platform, diags = detect_data_type_and_platform(combined_expr)
 
-    # 4) log2 & z
-    expr_log2 = np.log2(combined_expr + 1).replace([np.inf,-np.inf], np.nan)
+    # 4) --- NORMALIZATION SELECTION (NEW) ---
+    # Rules:
+    #   If CV(library sizes) >= 0.30  -> TMM
+    #   Else if zero_fraction > 0.25  -> CPM
+    #   Else                          -> log2(counts+1)
+    normalization = "log2_counts_plus1"
+    expr_log2 = None
+
+    if is_counts_like(combined_expr):
+        lib_cv = calc_libsize_cv(combined_expr)
+        zero_fraction = float((combined_expr == 0).sum().sum()) / float(combined_expr.size) if combined_expr.size else 0.0
+
+        if lib_cv >= 0.30:
+            # TMM normalization → log2(TMM + 1)
+            TMM = tmm_normalize(combined_expr)
+            expr_log2 = np.log2(TMM + 1.0)
+            normalization = f"TMM (CV={lib_cv:.3f}) -> log2(TMM+1)"
+        elif zero_fraction > 0.25:
+            # CPM normalization → log2(CPM + 1)
+            CPM = cpm_normalize(combined_expr)
+            expr_log2 = np.log2(CPM + 1.0)
+            normalization = f"CPM (zeros={zero_fraction:.2%}) -> log2(CPM+1)"
+        else:
+            # Default log2(counts + 1)
+            expr_log2 = np.log2(combined_expr + 1.0)
+            normalization = "log2(counts+1)"
+    else:
+        # For non-counts-like inputs (arrays/TPM/etc.), keep the previous generic transform
+        expr_log2 = np.log2(combined_expr + 1.0)
+        normalization = "log2(expr+1) (non-counts-like)"
+
+    expr_log2 = expr_log2.replace([np.inf,-np.inf], np.nan)
+
+    # Keep z-score for diagnostics
     row_mean = expr_log2.mean(axis=1); row_std = expr_log2.std(axis=1, ddof=1).replace(0, np.nan)
     expr_z = expr_log2.sub(row_mean, axis=0).div(row_std, axis=0).replace([np.inf,-np.inf], np.nan).fillna(0)
 
@@ -786,7 +896,7 @@ def run_pipeline(
     use_combat = (
         _HAVE_SCANPY
         and batch_sizes.size >= 2
-        and (batch_sizes >= min_batch_size_for_combat).all()  # no singleton batches
+        and (batch_sizes >= min_batch_size_for_combat).all()
         and expr_filtered.shape[0] > 0
         and expr_filtered.shape[1] > 1
     )
@@ -877,6 +987,7 @@ def run_pipeline(
                "value_range_approx": float(diags.get("value_range_approx", np.nan)),
                "harmonization_mode": mode,
                "platform": platform,
+               "normalization": normalization,
                "genes_zero_std_after_harmonization": genes_zero_std_after,
                **kpi},
         "shapes": {"genes": int(combined_expr.shape[0]), "samples": int(combined_expr.shape[1])},
@@ -1076,7 +1187,7 @@ def run_pipeline_multi(
             single_expression_file=d["counts"],
             single_expression_name_hint=d.get("counts_name"),
             metadata_file=d["meta"],
-            metadata_name_hint=d.get("meta_name"),   # let the reader sniff
+            metadata_name_hint=d.get("meta_name"),
             metadata_id_cols=d.get("meta_id_cols") or ["Id","ID","id","sample","Sample","bare_id"],
             metadata_group_cols=d.get("meta_group_cols") or ["group","Group","condition","Condition","phenotype","Phenotype"],
             metadata_batch_col=d.get("meta_batch_col"),
