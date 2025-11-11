@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # harmonizer.py — single-dataset pipeline + Multi-GEO wrapper + meta-analysis + presenter assets
-import os, re, io, json, warnings, zipfile, tempfile
+import os, re, io, json, warnings, zipfile
 from typing import Dict, Tuple, List, Iterable, Optional
 import numpy as np
 import pandas as pd
@@ -154,16 +154,10 @@ def build_metadata_from_columns(columns: List[str], groups_from_prefix: bool = T
     return df
 
 def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFrame:
-    """
-    Robustly read metadata from Excel or delimited text (CSV/TSV/TXT) with delimiter sniffing.
-    Works even if a .txt/.tsv file is actually comma-separated (prevents ['sample,condition']).
-    """
     import csv
     is_pathlike = isinstance(metadata_obj, (str, os.PathLike))
     suffix = (os.path.splitext(name_hint)[1].lower() if name_hint
               else (os.path.splitext(str(metadata_obj))[1].lower() if is_pathlike else ""))
-
-    # Excel first
     if suffix in (".xlsx", ".xls"):
         return (pd.read_excel(metadata_obj, engine="openpyxl")
                 if is_pathlike else pd.read_excel(_as_bytesio_seekable(metadata_obj), engine="openpyxl"))
@@ -171,22 +165,15 @@ def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFra
     def _peek_bytes(obj, n=4096) -> bytes:
         try:
             if isinstance(obj, (str, os.PathLike)):
-                with open(obj, "rb") as fh:
-                    return fh.read(n)
-            bio = _as_bytesio_seekable(obj)
-            pos = bio.tell()
-            b = bio.read(n)
-            bio.seek(pos)
-            return b
+                with open(obj, "rb") as fh: return fh.read(n)
+            bio = _as_bytesio_seekable(obj); pos = bio.tell(); b = bio.read(n); bio.seek(pos); return b
         except Exception:
             return b""
 
     def _sniff_sep(obj) -> str | None:
         sample = _peek_bytes(obj, 4096).decode(errors="ignore")
-        if "\t" in sample and "," not in sample:
-            return "\t"
-        if "," in sample and "\t" not in sample:
-            return ","
+        if "\t" in sample and "," not in sample: return "\t"
+        if "," in sample and "\t" not in sample: return ","
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=[",", "\t", ";", "|"])
             return dialect.delimiter
@@ -194,30 +181,19 @@ def _read_metadata_any(metadata_obj, name_hint: str | None = None) -> pd.DataFra
             return None
 
     def _read_text(obj):
-        # 1) pandas inference
-        try:
-            return pd.read_csv(obj, sep=None, engine="python")
-        except Exception:
-            pass
-        # 2) sniffed delimiter
+        try: return pd.read_csv(obj, sep=None, engine="python")
+        except Exception: pass
         sep = _sniff_sep(obj)
         if sep:
-            try:
-                return pd.read_csv(obj, sep=sep)
-            except Exception:
-                pass
-        # 3) fallbacks
+            try: return pd.read_csv(obj, sep=sep)
+            except Exception: pass
         for sep in [",", "\t", ";", "|"]:
-            try:
-                return pd.read_csv(obj, sep=sep)
-            except Exception:
-                continue
-        # 4) last resort: try excel
+            try: return pd.read_csv(obj, sep=sep)
+            except Exception: continue
         return (pd.read_excel(obj, engine="openpyxl")
                 if isinstance(obj, (str, os.PathLike))
                 else pd.read_excel(_as_bytesio_seekable(obj), engine="openpyxl"))
 
-    # Route text-like / unknown suffixes through the robust reader
     return _read_text(metadata_obj if is_pathlike else _as_bytesio_seekable(metadata_obj))
 
 # ---------------- Batch detection ----------------
@@ -299,7 +275,6 @@ def detect_data_type_and_platform(X: pd.DataFrame) -> Tuple[str, str, Dict]:
 
 # ---------------- NEW: Normalization helpers ----------------
 def calc_libsize_cv(counts: pd.DataFrame) -> float:
-    """Coefficient of variation of library sizes (column sums) on nonnegative matrix."""
     C = counts.clip(lower=0).fillna(0.0)
     lib = C.sum(axis=0).astype(float).values
     if lib.size == 0 or np.all(lib == 0): return 0.0
@@ -307,72 +282,52 @@ def calc_libsize_cv(counts: pd.DataFrame) -> float:
     return float(sd / (mu if mu > 0 else 1.0))
 
 def is_counts_like(X: pd.DataFrame) -> bool:
-    """Heuristic: nonnegative, many integers, wide dynamic range."""
-    vals = X.values.ravel()
-    vals = vals[np.isfinite(vals)]
+    vals = X.values.ravel(); vals = vals[np.isfinite(vals)]
     if vals.size == 0: return False
     if np.min(vals) < 0: return False
-    # integer-ish fraction
     int_frac = np.mean(np.isclose(vals, np.round(vals)))
     return (int_frac > 0.8)
 
 def cpm_normalize(counts: pd.DataFrame) -> pd.DataFrame:
     C = counts.clip(lower=0).astype(float)
-    lib = C.sum(axis=0)
-    lib = lib.replace(0, np.nan)
+    lib = C.sum(axis=0).replace(0, np.nan)
     CPM = (C * 1e6).div(lib, axis=1).fillna(0.0)
     return CPM
 
 def _tmm_factor(ref: np.ndarray, tgt: np.ndarray, ref_lib: float, tgt_lib: float,
-                trim_m: float = 0.30, trim_a: float = 0.05, min_count: float = 1.0) -> float:
-    """Compute a single TMM scaling factor for tgt vs ref (trimmed mean of M)."""
-    # keep positive
+                trim_m: float = 0.30, trim_a: float = 0.05) -> float:
     g = (ref > 0) & (tgt > 0)
     ref_g, tgt_g = ref[g], tgt[g]
     if ref_g.size < 5: return 1.0
-    # M and A
     M = np.log2((tgt_g / tgt_lib) / (ref_g / ref_lib))
     A = 0.5 * np.log2((tgt_g / tgt_lib) * (ref_g / ref_lib))
-    # weights as in edgeR doc (approx)
     w = 1.0 / ((tgt_g / tgt_lib) + (ref_g / ref_lib))
-    # trim extremes in M and A
     def _trim(x, prop):
         if prop <= 0: return np.ones_like(x, dtype=bool)
-        lo = np.quantile(x, prop/2.0)
-        hi = np.quantile(x, 1.0 - prop/2.0)
+        lo = np.quantile(x, prop/2.0); hi = np.quantile(x, 1.0 - prop/2.0)
         return (x >= lo) & (x <= hi)
     keep = _trim(M, trim_m) & _trim(A, trim_a)
     if np.sum(keep) < 5: return 1.0
-    M_k, w_k = M[keep], w[keep]
-    # weighted mean of M
-    f = np.average(M_k, weights=w_k)
-    # scaling factor on original scale
+    f = np.average(M[keep], weights=w[keep])
     return float(2.0 ** f)
 
 def tmm_normalize(counts: pd.DataFrame) -> pd.DataFrame:
-    """Return TMM-normalized counts-per-million-like matrix (scale factors then rescale to common lib)."""
     C = counts.clip(lower=0).astype(float)
     libs = C.sum(axis=0).astype(float)
-    # choose reference as median library size column
     ref_col = libs.sub(libs.median()).abs().sort_values().index[0]
     ref = C[ref_col].values
     ref_lib = float(libs[ref_col]) if float(libs[ref_col]) > 0 else 1.0
     factors = {}
     for col in C.columns:
-        tgt = C[col].values
-        tgt_lib = float(libs[col]) if float(libs[col]) > 0 else 1.0
         if col == ref_col:
             factors[col] = 1.0
         else:
             try:
+                tgt = C[col].values; tgt_lib = float(libs[col]) if float(libs[col]) > 0 else 1.0
                 factors[col] = _tmm_factor(ref, tgt, ref_lib, tgt_lib)
             except Exception:
                 factors[col] = 1.0
-    f = pd.Series(factors)
-    # Effective library size = lib * factor
-    eff_lib = libs * f
-    eff_lib = eff_lib.replace(0, np.nan)
-    # Return TMM-normalized CPM-like values
+    eff_lib = (libs * pd.Series(factors)).replace(0, np.nan)
     TMM = (C * 1e6).div(eff_lib, axis=1).fillna(0.0)
     return TMM
 
@@ -607,7 +562,6 @@ def nonlinear_embedding_plots(Xc, meta, figdir, harmonization_mode, make=True):
         except Exception: pass
     if Emb is None and _HAVE_TSNE:
         try:
-            from sklearn.manifold import TSNE
             perplexity = max(5, min(30, (Xp_embed.shape[0]-1)//3))
             tsne = TSNE(n_components=2, init="pca", learning_rate="auto",
                         perplexity=perplexity, n_iter=1000, random_state=42)
@@ -710,10 +664,8 @@ def _z_from_p_two_sided(p, sign):
 
 def _stouffer_meta(z_list, w_list=None):
     z = np.asarray(z_list, float)
-    if w_list is None:
-        w = np.ones_like(z)
-    else:
-        w = np.asarray(w_list, float)
+    if w_list is None: w = np.ones_like(z)
+    else: w = np.asarray(w_list, float)
     if z.size == 0: return np.nan
     z_meta = (w * z).sum() / np.sqrt((w**2).sum())
     return z_meta
@@ -745,7 +697,8 @@ def run_pipeline(
     OUTDIR = os.path.join(out_root)
     FIGDIR = os.path.join(OUTDIR, fig_subdir)
     REPORT_DIR = os.path.join(OUTDIR, "report")
-    os.makedirs(FIGDIR, exist_ok=True); os.makedirs(REPORT_DIR, exist_ok=True)
+    HARM_DIR = os.path.join(OUTDIR, "harmonized")
+    os.makedirs(FIGDIR, exist_ok=True); os.makedirs(REPORT_DIR, exist_ok=True); os.makedirs(HARM_DIR, exist_ok=True)
 
     # 1) expression
     if single_expression_file is not None:
@@ -840,38 +793,43 @@ def run_pipeline(
     # 3) detect type
     dtype, platform, diags = detect_data_type_and_platform(combined_expr)
 
-    # 4) --- NORMALIZATION SELECTION (NEW) ---
+    # ---- Precompute indicators for normalization decision (for report) ----
+    libsize_cv = calc_libsize_cv(combined_expr)
+    zero_fraction_all = float((combined_expr == 0).sum().sum()) / float(combined_expr.size) if combined_expr.size else 0.0
+    counts_like_flag = is_counts_like(combined_expr)
+
+    # 4) --- NORMALIZATION SELECTION ---
     # Rules:
     #   If CV(library sizes) >= 0.30  -> TMM
     #   Else if zero_fraction > 0.25  -> CPM
     #   Else                          -> log2(counts+1)
     normalization = "log2_counts_plus1"
+    normalization_reason = "Default path"
     expr_log2 = None
 
-    if is_counts_like(combined_expr):
-        lib_cv = calc_libsize_cv(combined_expr)
-        zero_fraction = float((combined_expr == 0).sum().sum()) / float(combined_expr.size) if combined_expr.size else 0.0
-
-        if lib_cv >= 0.30:
-            # TMM normalization → log2(TMM + 1)
+    if counts_like_flag:
+        if libsize_cv >= 0.30:
             TMM = tmm_normalize(combined_expr)
             expr_log2 = np.log2(TMM + 1.0)
-            normalization = f"TMM (CV={lib_cv:.3f}) -> log2(TMM+1)"
-        elif zero_fraction > 0.25:
-            # CPM normalization → log2(CPM + 1)
+            normalization = "TMM_then_log2"
+            normalization_reason = f"CV(library sizes)={libsize_cv:.3f} \u2265 0.30"
+        elif zero_fraction_all > 0.25:
             CPM = cpm_normalize(combined_expr)
             expr_log2 = np.log2(CPM + 1.0)
-            normalization = f"CPM (zeros={zero_fraction:.2%}) -> log2(CPM+1)"
+            normalization = "CPM_then_log2"
+            normalization_reason = f"Zero fraction={zero_fraction_all:.2%} > 25%"
         else:
-            # Default log2(counts + 1)
             expr_log2 = np.log2(combined_expr + 1.0)
-            normalization = "log2(counts+1)"
+            normalization = "log2_counts_plus1"
+            normalization_reason = f"CV={libsize_cv:.3f} < 0.30 and zeros={zero_fraction_all:.2%} \u2264 25%"
     else:
-        # For non-counts-like inputs (arrays/TPM/etc.), keep the previous generic transform
         expr_log2 = np.log2(combined_expr + 1.0)
-        normalization = "log2(expr+1) (non-counts-like)"
+        normalization = "log2_expr_plus1_non_countslike"
+        normalization_reason = "Detected non-counts-like input (e.g., array/TPM); applied generic log2(x+1)"
 
     expr_log2 = expr_log2.replace([np.inf,-np.inf], np.nan)
+    print(f"[HARMONIZER] Normalization = {normalization} | {normalization_reason} | "
+          f"CV={libsize_cv:.3f}, zeros={zero_fraction_all:.2%}, counts-like={counts_like_flag}")
 
     # Keep z-score for diagnostics
     row_mean = expr_log2.mean(axis=1); row_std = expr_log2.std(axis=1, ddof=1).replace(0, np.nan)
@@ -884,7 +842,7 @@ def run_pipeline(
     topk = min(pca_topk_features, len(pos)) if len(pos) > 0 else 0
     expr_filtered = expr_imputed.loc[pos.nlargest(topk).index] if topk > 0 else expr_imputed.iloc[0:0]
 
-    # 6) harmonize (ComBat or fallback) — GUARDED against singleton batches
+    # 6) harmonize (ComBat or fallback)
     meta["batch_collapsed"] = smart_batch_collapse(meta, min_batch_size_for_combat)
     if meta.index.duplicated().any():
         meta = _collapse_dupes_df_by_index(meta, how_num="median", keep="first")
@@ -909,7 +867,7 @@ def run_pipeline(
         expr_harmonized = _fallback_center(expr_filtered, meta_batch)
         mode = "fallback_center"
 
-    # 7) PCA (fail-soft with fallback to pre-harmonized features)
+    # 7) PCA (fail-soft)
     pca_df = pd.DataFrame(index=expr_harmonized.columns); kpi = {}; pca_skipped_reason = None
     pca_origin = "harmonized"
     try:
@@ -974,28 +932,49 @@ def run_pipeline(
         heatmap_top_de(expr_log2, meta, df, k, os.path.join(OUTDIR, "figs"), topn=50)
 
     # 11) GSEA (optional) — stub
-    gsea_dir = os.path.join(OUTDIR, "gsea"); os.makedirs(gsea_dir, exist_ok=True)
+    os.makedirs(os.path.join(OUTDIR, "gsea"), exist_ok=True)
 
     # 12) Save outputs + richer report
-    expr_harmonized.to_csv(os.path.join(OUTDIR, "expression_harmonized.tsv"), sep="\t")
-    pca_df.to_csv(os.path.join(OUTDIR, "pca_scores.tsv"), sep="\t")
+    # Save harmonized deliverables into per-dataset "harmonized" folder
+    expr_harmonized.to_csv(os.path.join(HARM_DIR, "expression_harmonized.tsv"), sep="\t")
+    pca_df.to_csv(os.path.join(HARM_DIR, "pca_scores.tsv"), sep="\t")
 
     genes_zero_std_after = int((expr_harmonized.std(axis=1, ddof=1).fillna(0) == 0).sum()) if expr_harmonized.shape[0] else 0
 
     rep = {
-        "qc": {"zero_fraction": float(diags.get("zero_fraction", np.nan)),
-               "value_range_approx": float(diags.get("value_range_approx", np.nan)),
-               "harmonization_mode": mode,
-               "platform": platform,
-               "normalization": normalization,
-               "genes_zero_std_after_harmonization": genes_zero_std_after,
-               **kpi},
+        "qc": {
+            "zero_fraction": float(diags.get("zero_fraction", np.nan)),
+            "value_range_approx": float(diags.get("value_range_approx", np.nan)),
+            "harmonization_mode": mode,
+            "platform": platform,
+            "normalization": normalization,
+            "normalization_reason": normalization_reason,
+            "library_size_cv": float(libsize_cv),
+            "counts_like": bool(counts_like_flag),
+            "genes_zero_std_after_harmonization": genes_zero_std_after,
+            **kpi
+        },
         "shapes": {"genes": int(combined_expr.shape[0]), "samples": int(combined_expr.shape[1])},
         "notes": {}
     }
     if pca_skipped_reason: rep["notes"]["pca_skipped_reason"] = pca_skipped_reason
-    with open(os.path.join(OUTDIR, "report.json"), "w") as f: json.dump(rep, f, indent=2)
 
+    # Write JSON to both: OUTDIR and REPORT_DIR (and copy into harmonized/)
+    with open(os.path.join(OUTDIR, "report.json"), "w") as f: json.dump(rep, f, indent=2)
+    with open(os.path.join(REPORT_DIR, "report.json"), "w") as f: json.dump(rep, f, indent=2)
+    with open(os.path.join(HARM_DIR, "report.json"), "w") as f: json.dump(rep, f, indent=2)
+
+    # Also a tiny plaintext summary under harmonized/
+    with open(os.path.join(HARM_DIR, "normalization.txt"), "w") as f:
+        f.write(
+            f"Normalization: {normalization}\n"
+            f"Reason: {normalization_reason}\n"
+            f"Library size CV: {libsize_cv:.3f}\n"
+            f"Zero fraction: {zero_fraction_all:.2%}\n"
+            f"Counts-like: {counts_like_flag}\n"
+        )
+
+    # Zip bundle contains entire OUTDIR (figs, de, harmonized, report, etc.)
     zip_path = os.path.join(OUTDIR, "results_bundle.zip")
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for root, _, files in os.walk(OUTDIR):
@@ -1004,19 +983,19 @@ def run_pipeline(
                 p = os.path.join(root, name)
                 zf.write(p, arcname=os.path.relpath(p, OUTDIR))
 
-    return {"outdir": OUTDIR, "figdir": os.path.join(OUTDIR, "figs"),
-            "report_json": os.path.join(OUTDIR, "report.json"), "zip": zip_path}
+    return {
+        "outdir": OUTDIR,
+        "harmonized_dir": HARM_DIR,
+        "figdir": os.path.join(OUTDIR, "figs"),
+        "report_json": os.path.join(OUTDIR, "report.json"),
+        "zip": zip_path
+    }
 
 # ---------------- Multi-GEO wrapper + meta-analysis ----------------
 def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_thresh: float = 0.10) -> Dict:
-    """
-    Combines per-dataset DE tables for Disease_vs_Control via signed Stouffer's Z.
-    Emits CSVs and a plain-text + PNG summary for Presenter Mode.
-    """
     os.makedirs(out_root, exist_ok=True)
     meta_dir = os.path.join(out_root, "meta"); os.makedirs(meta_dir, exist_ok=True)
 
-    # gather per-dataset DE
     per = {}
     for name, res in runs.items():
         de_dir = os.path.join(res["outdir"], "de")
@@ -1039,7 +1018,6 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
     if not per:
         return {"meta_dir": meta_dir, "n_datasets_with_de": 0}
 
-    # union of genes; compute meta stats
     genes = set().union(*[set(df.index.astype(str)) for df in per.values()])
     rows = []
     from scipy.stats import norm
@@ -1063,8 +1041,7 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
     if not rows:
         return {"meta_dir": meta_dir, "n_datasets_with_de": len(per)}
 
-    meta_df = pd.DataFrame(rows, columns=["gene","z_meta","p_meta","consistent_dir","consistency"])
-    meta_df = meta_df.set_index("gene")
+    meta_df = pd.DataFrame(rows, columns=["gene","z_meta","p_meta","consistent_dir","consistency"]).set_index("gene")
     meta_df["q_meta"] = _bh(meta_df["p_meta"].values)
 
     med_abs = []
@@ -1077,7 +1054,6 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
         med_abs.append(np.median(vals) if vals else 0.0)
     meta_df["meta_log2FC_proxy"] = np.sign(meta_df["z_meta"].values) * np.array(med_abs, float)
 
-    # save meta tables
     meta_df.sort_values("q_meta").to_csv(os.path.join(meta_dir, "meta_analysis_results.csv"))
     ups = meta_df[(meta_df["q_meta"] < fdr_thresh) & (meta_df["meta_log2FC_proxy"] > 0) & (meta_df["consistency"] >= 0.6)]
     ups.sort_values(["q_meta","consistency"], ascending=[True, False]).to_csv(os.path.join(meta_dir, "upregulated_genes_meta.csv"))
@@ -1085,7 +1061,7 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
     meta_df.sort_values("q_meta").head(500).to_csv(os.path.join(meta_dir, "drug_targets_analysis.csv"))
     meta_df.sort_values("q_meta").head(20).to_csv(os.path.join(meta_dir, "final_analysis_summary.csv"))
 
-    # Build plain-text Key Findings
+    # Text + small PNG
     total_genes = len(genes)
     sig = int((meta_df["q_meta"] < fdr_thresh).sum())
     up_consistent = int(((meta_df["q_meta"] < fdr_thresh) & (meta_df["meta_log2FC_proxy"] > 0) & (meta_df["consistency"] >= 0.6)).sum())
@@ -1101,16 +1077,14 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
         "📊 STATISTICAL RESULTS:",
         f"   • Significant genes (FDR < {fdr_thresh}): {sig:,}",
         f"   • Consistently upregulated genes: {up_consistent:,}",
-        f"   • Meta-analysis method: Signed Stouffer Z (gene-level)",
+        "   • Meta-analysis method: Signed Stouffer Z (gene-level)",
         "",
         "🧬 TOP BIOMARKER CANDIDATES:",
     ]
     top10 = meta_df.sort_values("q_meta").head(10)
     i = 1
     for g, r in top10.iterrows():
-        text_lines.append(
-            f"    {i}. {g:<12} | LogFC*: {r['meta_log2FC_proxy']:+.3f} | FDR: {r['q_meta']:.2e} | Potential: {'High' if r['q_meta'] < 0.01 else 'Medium'}"
-        )
+        text_lines.append(f"    {i}. {g:<12} | LogFC*: {r['meta_log2FC_proxy']:+.3f} | FDR: {r['q_meta']:.2e} | Potential: {'High' if r['q_meta'] < 0.01 else 'Medium'}")
         i += 1
     text_lines += [
         "",
@@ -1119,35 +1093,11 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
         "   ✓ Gene-level aggregation for cross-platform compatibility",
         "   ✓ Consistency filtering (same direction across datasets)",
         f"   ✓ Robust statistical thresholds (FDR < {fdr_thresh})",
-        "",
-        "📁 OUTPUT FILES GENERATED:",
-        "   • deg_results_annotated.csv - Full DEG-like meta results (top subset)",
-        "   • meta_analysis_results.csv - Complete meta-analysis results",
-        "   • upregulated_genes_meta.csv - Consistently upregulated genes",
-        "   • drug_targets_analysis.csv - Candidate targets (top subset)",
-        "   • final_analysis_summary.csv - Top 20 biomarker candidates",
-        "   • diabetes_harmonized_analysis_comprehensive.png - Comprehensive visualization",
-        "",
-        "📈 BIOLOGICAL SIGNIFICANCE:",
-        "   • Cross-dataset validation reduces false positives",
-        "   • Directional consistency suggests robust association",
-        "   • Multi-platform validation increases clinical relevance",
-        "",
-        "🎯 NEXT STEPS FOR CLINICAL TRANSLATION:",
-        "   1. Validate biomarkers in independent cohorts",
-        "   2. Investigate targets through pathway analysis",
-        "   3. Design therapeutic interventions",
-        "   4. Develop diagnostic/prognostic assays",
-        "",
-        "🏁 HARMONIZATION ANALYSIS COMPLETE",
-        "   Approach: Biologically sound meta-analysis",
-        "   Result: High-confidence biomarkers identified."
     ]
     summary_txt = os.path.join(meta_dir, "final_analysis_summary.txt")
     with open(summary_txt, "w") as fh:
         fh.write("\n".join(text_lines))
 
-    # Create a simple hero PNG for Presenter Mode
     try:
         plt.figure(figsize=(10,6))
         top_plot = meta_df.sort_values("q_meta").head(10)[["q_meta"]].copy()
@@ -1156,10 +1106,10 @@ def meta_analyze_disease_vs_control(runs: Dict[str, Dict], out_root: str, fdr_th
         plt.xticks(x, top_plot.index.tolist(), rotation=60, ha="right", fontsize=9)
         plt.ylabel("-log10(FDR)")
         plt.title("Top Meta-analysis Signals (lower FDR is better)")
-        summary_png = os.path.join(meta_dir, "diabetes_harmonized_analysis_comprehensive.png")
+        summary_png = os.path.join(meta_dir, "meta_top_signals.png")
         _savefig(summary_png)
     except Exception:
-        summary_png = os.path.join(meta_dir, "diabetes_harmonized_analysis_comprehensive.png")
+        summary_png = os.path.join(meta_dir, "meta_top_signals.png")
 
     return {
         "meta_dir": meta_dir,
@@ -1213,14 +1163,10 @@ def run_pipeline_multi(
         if n_common >= combine_minoverlap_genes:
             decision["combined"] = True
             common = list(common)
-            expr_joined = []
-            meta_joined = []
+            expr_joined, meta_joined = [], []
             for name, X in exprs.items():
-                Xi = X.loc[common]
-                expr_joined.append(Xi)
-                m = metas[name].copy()
-                m["dataset"] = name
-                meta_joined.append(m)
+                Xi = X.loc[common]; expr_joined.append(Xi)
+                m = metas[name].copy(); m["dataset"] = name; meta_joined.append(m)
             expr_all = pd.concat(expr_joined, axis=1, join="outer")
             meta_all = pd.concat(meta_joined, axis=0)
 
@@ -1247,7 +1193,6 @@ def run_pipeline_multi(
                 make_nonlinear=make_nonlinear,
             )
 
-    # run meta-analysis (uses per-dataset DE tables)
     meta = meta_analyze_disease_vs_control(runs, out_root=os.path.join(out_root, "meta_summary"))
 
     out = {
