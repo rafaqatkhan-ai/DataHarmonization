@@ -22,6 +22,12 @@ def _clear_caches():
     except Exception:
         pass
 
+# Rerun helper (works on new and old Streamlit)
+def _rerun():
+    fn = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
+    if fn is not None:
+        fn()
+
 # Init session state
 if "run_id" not in st.session_state: st.session_state.run_id = None
 if "out" not in st.session_state: st.session_state.out = None
@@ -740,7 +746,7 @@ with tabs[6]:
                             st.image(p, caption=f, use_column_width=True)
                 if st.button(f"🔀 Switch to: {name}", key=f"switch_{name}"):
                     st.session_state.selected_dataset = name
-                    st.experimental_rerun()
+                    _rerun()
 
 # ---- Multi-dataset Summary
 with tabs[7]:
@@ -770,7 +776,7 @@ with tabs[7]:
             with open(summary_txt, "rb") as fh:
                 safe_download_button("⬇️ Download summary (TXT)", fh.read(),
                                      file_name="final_analysis_summary.txt",
-                                     mime="text/plain", key=f"dl_summary_txt__{run_id}")
+                                     mime="text/plain", key="dl_summary_txt__{run_id}")
 
         if summary_png and os.path.exists(summary_png):
             st.image(summary_png, caption=os.path.basename(summary_png), use_column_width=True)
@@ -872,7 +878,7 @@ with tabs[9]:
                 "platform": qc.get("platform", None),
             })
         if basic_rows:
-            st.dataframe(pd.DataFrame(basic_rows).set_index("dataset"), use_container_width=True)
+            st.dataframe(pd.DataFrame(basic_rows).set_index("dataset"), use_column_width=True)
 
         def load_genes(path):
             try:
@@ -898,7 +904,7 @@ with tabs[9]:
         st.write("#### Gene overlap (intersection counts)")
         st.dataframe(inter, use_container_width=True)
         st.write("#### Jaccard index of gene overlap")
-        st.dataframe(jacc, use_container_width=True)
+        st.dataframe(jacc, use_column_width=True)
 
         st.write("#### Overlap of top DE genes")
         def top_de_genes(outdir, topn=200):
@@ -985,4 +991,4 @@ with tabs[10]:
                 reply_text = str(res)
 
             st.session_state.agent_messages.append(("agent", reply_text))
-            st.experimental_rerun()
+            _rerun()
