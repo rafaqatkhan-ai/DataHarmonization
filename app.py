@@ -335,7 +335,6 @@ if run:
                     st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
                     st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
                     st.session_state.multi = multi_out
-                    # safe to write here (before widgets)
                     if multi_out.get("combined"):
                         st.session_state.selected_dataset = "[Combined]"
                     else:
@@ -498,7 +497,6 @@ if run:
                 st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
                 st.session_state.run_token = f"{st.session_state.run_id}-{_dt.datetime.now().timestamp():.0f}"
                 st.session_state.multi = multi_out
-                # safe: before widgets
                 if multi_out.get("combined"):
                     st.session_state.selected_dataset = "[Combined]"
                 else:
@@ -521,19 +519,16 @@ def _get_current_out():
         has_combined = bool(multi_ctx.get("combined"))
         run_keys = list(multi_ctx["runs"].keys())
 
-        # Use selection if valid
         if sel == "[Combined]" and has_combined:
             return multi_ctx.get("combined") or st.session_state.get("out")
         if sel in run_keys:
             return multi_ctx["runs"][sel]
 
-        # Fallbacks without mutating session_state
         if has_combined:
             return multi_ctx["combined"]
         if run_keys:
             return multi_ctx["runs"][run_keys[0]]
         return None
-    # single run
     return st.session_state.get("out")
 
 # Sidebar selector (when multi)
@@ -543,7 +538,6 @@ if multi_ctx and isinstance(multi_ctx, dict) and multi_ctx.get("runs"):
     run_keys = list(multi_ctx["runs"].keys())
     options = (["[Combined]"] if has_combined else []) + run_keys
 
-    # default_index purely local (widget will set session_state)
     default_index = 0
     if st.session_state.get("selected_dataset") in options:
         default_index = options.index(st.session_state["selected_dataset"])
@@ -674,7 +668,7 @@ with tabs[3]:
             tsv = os.path.join(de_dir, f"DE_{pick}.tsv")
             try:
                 df = pd.read_csv(tsv, sep="\t", index_col=0).head(50)
-                st.dataframe(df, use_column_width=True, key=f"de_table__{run_id}__{pick}")
+                st.dataframe(df, use_container_width=True, key=f"de_table__{run_id}__{pick}")
                 with open(tsv, "rb") as fh:
                     safe_download_button(
                         "⬇️ Download full DE table", fh.read(),
@@ -691,7 +685,7 @@ with tabs[3]:
                     st.write(f)
                     try:
                         df = pd.read_csv(os.path.join(gsea_dir, f), sep="\t").head(30)
-                        st.dataframe(df, use_column_width=True, key=f"gsea_{run_id}__{f}")
+                        st.dataframe(df, use_container_width=True, key=f"gsea_{run_id}__{f}")
                     except Exception:
                         pass
 
@@ -723,7 +717,7 @@ with tabs[4]:
                 else:
                     display_df = df.rename(columns={"IsolationForest":"IsolationForest_flag","LOF":"LOF_flag"})
                 st.write("### Outlier flags (1 = outlier)")
-                st.dataframe(display_df, use_column_width=True, key=f"outliers_df__{cache_buster}")
+                st.dataframe(display_df, use_container_width=True, key=f"outliers_df__{cache_buster}")
                 with open(outliers_path, "rb") as fh:
                     safe_download_button(
                         "⬇️ Download outlier table", fh.read(), file_name="outliers.tsv",
@@ -973,9 +967,9 @@ with tabs[9]:
                 inter.loc[a,b] = inter_set
                 jacc.loc[a,b] = inter_set / union_set if union_set else None
         st.write("#### Gene overlap (intersection counts)")
-        st.dataframe(inter, use_column_width=True)
+        st.dataframe(inter, use_container_width=True)
         st.write("#### Jaccard index of gene overlap")
-        st.dataframe(jacc, use_column_width=True)
+        st.dataframe(jacc, use_container_width=True)
 
         st.write("#### Overlap of top DE genes")
         def top_de_genes(outdir, topn=200):
@@ -1001,7 +995,7 @@ with tabs[9]:
                 de_overlap.loc[a,b] = None
             else:
                 de_overlap.loc[a,b] = len(A & B)
-        st.dataframe(de_overlap, use_column_width=True)
+        st.dataframe(de_overlap, use_container_width=True)
         st.caption("Higher intersections and Jaccard suggest stronger similarity across datasets.")
 
 # ---- Agent tab (LLM/agentic)
