@@ -1072,6 +1072,47 @@ with tabs[10]:
 
     if st.button("Send to agent"):
         if user_msg.strip():
+            # 1) store user message
+            st.session_state.agent_messages.append(("user", user_msg.strip()))
+
+            agent = st.session_state.agent
+            sa_bytes = sa_json_agent.getvalue() if sa_json_agent is not None else None
+            res = agent.handle_command(
+                user_msg,
+                sa_json_bytes=sa_bytes,
+                deg_root_link_or_id=drive_link_agent.strip() or None,
+            )
+
+            # 2) extract reply text
+            if isinstance(res, dict):
+                reply_text = res.get("reply", str(res))
+                out = res.get("out")
+                multi = res.get("multi")
+                run_id = res.get("run_id")
+
+                # update main app state if agent produced a run
+                if out is not None:
+                    st.session_state.out = out
+                if multi is not None:
+                    st.session_state.multi = multi
+                if run_id is not None:
+                    st.session_state.run_id = run_id
+            else:
+                reply_text = str(res)
+
+            # 3) store agent message
+            st.session_state.agent_messages.append(("agent", reply_text))
+
+            # 4) rerun to refresh all tabs (Overview, Multi-dataset Summary, etc.)
+            st.rerun()
+
+        else:
+            st.markdown(f"**Agent:** {msg}")
+
+    user_msg = st.text_input("Command to agent", key="agent_input", placeholder="e.g. search diabetes on drive")
+
+    if st.button("Send to agent"):
+        if user_msg.strip():
             st.session_state.agent_messages.append(("user", user_msg.strip()))
             agent = st.session_state.agent
             sa_bytes = sa_json_agent.getvalue() if sa_json_agent is not None else None
@@ -1082,3 +1123,4 @@ with tabs[10]:
             )
             st.session_state.agent_messages.append(("agent", reply))
             st.rerun()
+
