@@ -1,249 +1,402 @@
-# agent.py — thin "agent" wrapper around drive_ingest + harmonizer
+# agent.py — simple orchestration agent for Drive search + harmonization
 
-from __future__ import annotations
-import os, io, datetime as _dt
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
+import os
+import io
+import datetime as _dt
+import json
+from typing import Optional, Dict, Any
 
-import harmonizer as hz
 import drive_ingest as din
-
-
-@dataclass
-class AgentState:
-    last_disease_query: Optional[str] = None
-    last_plan: Optional[Dict[str, Any]] = None
-    last_run_id: Optional[str] = None
-    last_out: Optional[Dict[str, Any]] = None
-    last_multi: Optional[Dict[str, Any]] = None
-    base_out_dir: str = "out"
+import harmonizer as hz
 
 
 class HarmonizationAgent:
     """
-    Very small 'agent' that exposes high-level actions:
-      - search_disease_on_drive
-      - run_harmonization_from_plan
-      - summarize_last_run
-    You can call these directly OR route natural language into them.
+    Very lightweight "agent" that:
+      - Searches Google Drive deg_data for disease keywords
+      - Stores the ingest plan
+      - Runs harmonization using harmonizer.run_pipeline / run_pipeline_multi
+      - Summarizes the last run
     """
-    def __init__(self, state: Optional[AgentState] = None):
-        self.state = state or AgentState()
 
-    # ---------- core tools / actions ----------
+    def __init__(self):
+        self.last_plan: Optional[Dict[str, Any]] = None
+        self.last_result: Optional[Dict[str, Any]] = None  # {"out":..., "multi":..., "run_id":...}
 
-    def search_disease_on_drive(
-        self,
-        sa_json_bytes: bytes,
-        deg_root_link_or_id: str,
-        disease_query: str,
-    ) -> str:
-        """
-        Uses DriveClient + make_ingest_plan to find datasets for a disease.
-        """
-        self.state.last_disease_query = disease_query.strip()
-
-        drv = din.DriveClient.from_service_account_bytes(sa_json_bytes)
-        plan = din.make_ingest_plan(drv, deg_root_link_or_id, disease_query=disease_query.strip())
-        self.state.last_plan = plan
-
-        mode = plan.get("mode")
-        if mode == "none":
-            return f"❌ No datasets found for query: '{disease_query}'. Reason: {plan.get('reason','')}"
-        elif mode == "single":
-            s = plan["single"]
-            return (
-                f"✅ Found **1 dataset** for '{disease_query}':\n"
-                f"- Counts: `{s['counts_name']}`\n"
-                f"- Meta: `{s['meta_name']}`\n"
-                f"Use: `run harmonization` to process it."
-            )
-        elif mode == "multi_dataset":
-            ds = plan["datasets"]
-            preview = "\n".join(
-                f"- {d['label']}   [counts: {d['counts_name']} | meta: {d['meta_name']}]"
-                for d in ds[:10]
-            )
-            extra = "" if len(ds) <= 10 else f"\n… and {len(ds) - 10} more."
-            return (
-                f"✅ Found **{len(ds)} datasets** for '{disease_query}'.\n"
-                f"{preview}{extra}\n\n"
-                "Use: `run harmonization` to run multi-dataset harmonization + meta-analysis."
-            )
-        else:
-            return f"⚠️ Unexpected ingest mode: {mode}"
-
-    def run_harmonization_from_plan(
-        self,
-        pca_topk_features: int = 5000,
-        make_nonlinear: bool = True,
-        combine_minoverlap_genes: int = 3000,
-    ) -> str:
-        """
-        Run harmonizer based on the last ingest plan.
-        """
-        plan = self.state.last_plan
-        if not plan:
-            return "❌ No ingest plan found. First say something like: `search diabetes on drive`."
-
-        out_root = os.path.join(
-            self.state.base_out_dir,
-            _dt.datetime.now().strftime("agent_%Y%m%d_%H%M%S"),
-        )
-
-        mode = plan.get("mode")
-        if mode == "single":
-            s = plan["single"]
-            kwargs = {
-                "single_expression_file": s["counts"],
-                "single_expression_name_hint": s["counts_name"],
-                "metadata_file": s["meta"],
-                "metadata_name_hint": s["meta_name"],
-                "metadata_id_cols": ["sample","Sample","Id","ID","id","CleanID","sample_id","Sample_ID","SampleID","bare_id"],
-                "metadata_group_cols": ["group","Group","condition","Condition","phenotype","Phenotype"],
-                "metadata_batch_col": None,
-                "out_root": out_root,
-                "pca_topk_features": int(pca_topk_features),
-                "make_nonlinear": make_nonlinear,
-            }
-            out = hz.run_pipeline(**kwargs)
-            self.state.last_run_id = os.path.basename(out_root)
-            self.state.last_out = out
-            self.state.last_multi = None
-
-            return (
-                f"🚀 Ran harmonization for **1 dataset**.\n"
-                f"- Outdir: `{out['outdir']}`\n"
-                f"- Figures in: `{out['figdir']}`\n"
-                f"- Zip bundle: `{out['zip']}`"
-            )
-
-        elif mode == "multi_dataset":
-            ds = plan["datasets"]
-            datasets_arg = []
-            for d in ds:
-                datasets_arg.append({
-                    "geo": d["label"],
-                    "counts": d["counts"],
-                    "counts_name": d["counts_name"],
-                    "meta": d["meta"],
-                    "meta_name": d["meta_name"],
-                    "meta_id_cols": ["sample","Sample","Id","ID","id","CleanID","sample_id","Sample_ID","SampleID","bare_id"],
-                    "meta_group_cols": ["group","Group","condition","Condition","phenotype","Phenotype"],
-                    "meta_batch_col": None,
-                })
-            kwargs_multi = {
-                "datasets": datasets_arg,
-                "attempt_combine": True,
-                "combine_minoverlap_genes": int(combine_minoverlap_genes),
-                "out_root": out_root,
-                "pca_topk_features": int(pca_topk_features),
-                "make_nonlinear": make_nonlinear,
-            }
-            multi_out = hz.run_pipeline_multi(**kwargs_multi)
-            self.state.last_run_id = os.path.basename(out_root)
-            self.state.last_out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
-            self.state.last_multi = multi_out
-
-            decision = multi_out.get("combine_decision", {}) or {}
-            combined = decision.get("combined", False)
-            overlap = decision.get("overlap_genes", 0)
-            n_ds = len(multi_out.get("runs", {}))
-
-            return (
-                f"🚀 Ran harmonization for **{n_ds} datasets**.\n"
-                f"- Combined run created: {'Yes' if combined else 'No'}\n"
-                f"- Overlapping genes: {overlap}\n"
-                f"- Meta-analysis dir: `{multi_out.get('meta_dir', '')}`"
-            )
-        else:
-            return f"⚠️ Cannot run harmonization: unsupported mode '{mode}'."
-
-    def summarize_last_run(self) -> str:
-        """
-        Simple text summary of last run based on report.json/meta-analysis.
-        """
-        out = self.state.last_out
-        if not out:
-            return "ℹ️ No completed harmonization found yet."
-
-        # read report.json if present
-        import json
-        report = {}
-        try:
-            with open(out["report_json"], "r") as fh:
-                report = json.load(fh)
-        except Exception:
-            pass
-
-        qc = report.get("qc", {})
-        shp = report.get("shapes", {})
-        lines = [
-            f"Run ID: {self.state.last_run_id}",
-            f"Genes: {shp.get('genes','?')}, Samples: {shp.get('samples','?')}",
-            f"Platform: {qc.get('platform','?')}",
-            f"Harmonization mode: {qc.get('harmonization_mode','?')}",
-            f"Zero fraction: {qc.get('zero_fraction', float('nan')):.2f}"
-              if isinstance(qc.get('zero_fraction'), (int,float)) else "Zero fraction: ?",
-        ]
-
-        # optional multi-dataset meta summary
-        if self.state.last_multi and self.state.last_multi.get("meta_dir"):
-            meta_dir = self.state.last_multi["meta_dir"]
-            summary_csv = os.path.join(meta_dir, "final_analysis_summary.csv")
-            try:
-                import pandas as pd
-                m = pd.read_csv(summary_csv, index_col=0)
-                top_genes = ", ".join(list(m.index[:5]))
-                lines.append(f"Top meta-analysis genes (first 5): {top_genes}")
-            except Exception:
-                pass
-
-        return "\n".join(lines)
-
-    # ---------- OPTIONAL: naive NL router (no external LLM) ----------
-
+    # ------------------------------
+    # Public entrypoint
+    # ------------------------------
     def handle_command(
         self,
         text: str,
         *,
         sa_json_bytes: Optional[bytes] = None,
         deg_root_link_or_id: Optional[str] = None,
-    ) -> str:
+        out_root_base: str = "out/agent_runs",
+        pca_topk: int = 5000,
+        do_nonlinear: bool = True,
+        combine_thresh: int = 3000,
+    ) -> Dict[str, Any]:
         """
-        Simple keyword-based router:
-          - 'search' + 'drive' or 'disease' => search_disease_on_drive
-          - 'run' or 'harmoniz'            => run_harmonization_from_plan
-          - 'summary' or 'summarize'       => summarize_last_run
-        You can replace this with an LLM that chooses which tool to call.
+        Returns a dict:
+          {
+            "reply": <str>,
+            "out": <single-run out dict or None>,
+            "multi": <multi-run dict or None>,
+            "run_id": <str or None>,
+          }
         """
-        t = text.lower().strip()
 
-        if ("search" in t or "find" in t) and ("drive" in t or "disease" in t):
-            if not sa_json_bytes or not deg_root_link_or_id:
-                return "❌ To search Drive I need the service-account JSON and deg_data folder link/ID."
-            # extract disease query: very naive ("search <stuff> on drive")
-            # You can make this smarter or pass disease separately from UI.
-            q = t
-            for k in ["search", "find", "on drive", "in drive", "disease"]:
-                q = q.replace(k, "")
-            q = q.strip()
-            if not q:
-                q = self.state.last_disease_query or ""
-            if not q:
-                return "Please specify a disease, e.g. `search diabetes on drive`."
-            return self.search_disease_on_drive(sa_json_bytes, deg_root_link_or_id, q)
+        cmd = (text or "").strip()
+        cmd_lower = cmd.lower()
 
-        if "run" in t or "harmoniz" in t:
-            return self.run_harmonization_from_plan()
+        # 1) SEARCH DRIVE
+        if "search" in cmd_lower and "drive" in cmd_lower:
+            return self._cmd_search_drive(
+                cmd=cmd,
+                sa_json_bytes=sa_json_bytes,
+                deg_root_link_or_id=deg_root_link_or_id,
+            )
 
-        if "summary" in t or "summarize" in t or "report" in t:
-            return self.summarize_last_run()
+        # 2) RUN HARMONIZATION
+        if "run" in cmd_lower and "harmonization" in cmd_lower:
+            return self._cmd_run_harmonization(
+                out_root_base=out_root_base,
+                pca_topk=pca_topk,
+                do_nonlinear=do_nonlinear,
+                combine_thresh=combine_thresh,
+            )
 
-        return (
-            "I didn't recognize that command.\n"
-            "You can say for example:\n"
-            "• `search diabetes on drive`\n"
-            "• `run harmonization`\n"
-            "• `show summary`"
-        )
+        # 3) SUMMARY
+        if "summary" in cmd_lower or "report" in cmd_lower:
+            return self._cmd_summary()
+
+        # 4) HELP / UNKNOWN
+        return {
+            "reply": (
+                "I didn't fully understand that.\n\n"
+                "You can try commands like:\n"
+                "- `search diabetes on drive`\n"
+                "- `run harmonization`\n"
+                "- `show summary`"
+            ),
+            "out": None,
+            "multi": None,
+            "run_id": None,
+        }
+
+    # ------------------------------
+    # Internal: search drive
+    # ------------------------------
+    def _cmd_search_drive(
+        self,
+        cmd: str,
+        *,
+        sa_json_bytes: Optional[bytes],
+        deg_root_link_or_id: Optional[str],
+    ) -> Dict[str, Any]:
+        if not sa_json_bytes:
+            return {
+                "reply": "Please upload a **Service Account JSON** for Drive access.",
+                "out": None,
+                "multi": None,
+                "run_id": None,
+            }
+        if not deg_root_link_or_id:
+            return {
+                "reply": "Please provide the **deg_data folder link or ID** for Drive search.",
+                "out": None,
+                "multi": None,
+                "run_id": None,
+            }
+
+        # crude extraction: everything between 'search' and 'on drive'
+        text = cmd.strip()
+        lower = text.lower()
+        disease_query = ""
+        try:
+            start = lower.index("search") + len("search")
+            end = lower.index("on drive") if "on drive" in lower else len(lower)
+            disease_query = text[start:end].strip(" :,-")
+        except Exception:
+            # fallback: remove keywords and use remaining
+            disease_query = (
+                lower.replace("search", "")
+                .replace("on drive", "")
+                .strip(" :,-")
+            )
+
+        try:
+            drv = din.DriveClient.from_service_account_bytes(sa_json_bytes)
+            plan = din.make_ingest_plan(
+                drv,
+                deg_root_link_or_id,
+                disease_query=disease_query or None,
+            )
+        except Exception as e:
+            return {
+                "reply": f"Drive search failed: {e}",
+                "out": None,
+                "multi": None,
+                "run_id": None,
+            }
+
+        self.last_plan = plan
+
+        mode = plan.get("mode")
+        if mode == "none":
+            return {
+                "reply": plan.get("reason", "No (counts, meta) pairs found under deg_data with that query."),
+                "out": None,
+                "multi": None,
+                "run_id": None,
+            }
+
+        if mode == "single":
+            label = plan["single"].get("label", "dataset")
+            disease = plan.get("disease")
+            prep = plan.get("prep_path")
+            extra = []
+            if disease:
+                extra.append(f"disease: **{disease}**")
+            if prep:
+                extra.append(f"prep path: `{prep}`")
+            extra_str = "  \n".join(extra) if extra else ""
+            reply = f"Found **1 dataset** for query `{disease_query or '(all)'}`: **{label}**"
+            if extra_str:
+                reply += "\n\n" + extra_str
+            reply += "\n\nYou can now say: `run harmonization`."
+            return {
+                "reply": reply,
+                "out": None,
+                "multi": None,
+                "run_id": None,
+            }
+
+        if mode == "multi_dataset":
+            ds = plan.get("datasets", [])
+            disease = plan.get("disease")
+            reply = f"Found **{len(ds)} datasets** for query `{disease_query or '(all)'}`."
+            if disease:
+                reply += f"\n\nDisease folder: **{disease}**"
+            reply += (
+                "\n\nYou can now say: `run harmonization` "
+                "to perform multi-dataset harmonization + meta-analysis."
+            )
+            return {
+                "reply": reply,
+                "out": None,
+                "multi": None,
+                "run_id": None,
+            }
+
+        return {
+            "reply": f"Got ingest plan with mode `{mode}`, but I don't know how to handle it yet.",
+            "out": None,
+            "multi": None,
+            "run_id": None,
+        }
+
+    # ------------------------------
+    # Internal: run harmonization
+    # ------------------------------
+    def _cmd_run_harmonization(
+        self,
+        *,
+        out_root_base: str,
+        pca_topk: int,
+        do_nonlinear: bool,
+        combine_thresh: int,
+    ) -> Dict[str, Any]:
+        if not self.last_plan:
+            return {
+                "reply": "I don't have a Drive plan yet. First ask me to `search <disease> on drive`.",
+                "out": None,
+                "multi": None,
+                "run_id": None,
+            }
+
+        mode = self.last_plan.get("mode")
+        os.makedirs(out_root_base, exist_ok=True)
+        run_id = _dt.datetime.now().strftime("agent_%Y%m%d_%H%M%S")
+        out_root = os.path.join(out_root_base, run_id)
+
+        out = None
+        multi_out = None
+
+        try:
+            if mode == "single":
+                single = self.last_plan["single"]
+                kwargs = {
+                    "single_expression_file": single["counts"],
+                    "single_expression_name_hint": single["counts_name"],
+                    "metadata_file": single["meta"],
+                    "metadata_name_hint": single["meta_name"],
+                    "metadata_id_cols": [
+                        "sample", "Sample", "Id", "ID", "id", "CleanID",
+                        "sample_id", "Sample_ID", "SampleID", "bare_id"
+                    ],
+                    "metadata_group_cols": [
+                        "group", "Group", "condition", "Condition",
+                        "phenotype", "Phenotype"
+                    ],
+                    "metadata_batch_col": None,
+                    "out_root": out_root,
+                    "pca_topk_features": int(pca_topk),
+                    "make_nonlinear": bool(do_nonlinear),
+                }
+                out = hz.run_pipeline(**kwargs)
+
+            elif mode == "multi_dataset":
+                ds = self.last_plan.get("datasets", [])
+                datasets_arg = []
+                for d in ds:
+                    datasets_arg.append({
+                        "geo": d["label"],
+                        "counts": d["counts"],
+                        "counts_name": d["counts_name"],
+                        "meta": d["meta"],
+                        "meta_name": d["meta_name"],
+                        "meta_id_cols": [
+                            "sample", "Sample", "Id", "ID", "id", "CleanID",
+                            "sample_id", "Sample_ID", "SampleID", "bare_id"
+                        ],
+                        "meta_group_cols": [
+                            "group", "Group", "condition", "Condition",
+                            "phenotype", "Phenotype"
+                        ],
+                        "meta_batch_col": None,
+                    })
+                kwargs_multi = {
+                    "datasets": datasets_arg,
+                    "attempt_combine": True,
+                    "combine_minoverlap_genes": int(combine_thresh),
+                    "out_root": out_root,
+                    "pca_topk_features": int(pca_topk),
+                    "make_nonlinear": bool(do_nonlinear),
+                }
+                multi_out = hz.run_pipeline_multi(**kwargs_multi)
+                out = multi_out.get("combined") or next(iter(multi_out["runs"].values()))
+
+            else:
+                return {
+                    "reply": f"Plan has unsupported mode `{mode}` for harmonization.",
+                    "out": None,
+                    "multi": None,
+                    "run_id": None,
+                }
+
+        except Exception as e:
+            return {
+                "reply": f"Harmonization failed: {e}",
+                "out": None,
+                "multi": None,
+                "run_id": None,
+            }
+
+        self.last_result = {"out": out, "multi": multi_out, "run_id": run_id}
+
+        # Build a short reply
+        shapes = {}
+        try:
+            with open(out["report_json"], "r") as fh:
+                rep = json.load(fh)
+            shapes = rep.get("shapes", {})
+        except Exception:
+            pass
+
+        n_samples = shapes.get("samples", "unknown")
+        n_genes = shapes.get("genes", "unknown")
+        if mode == "single":
+            reply = (
+                f"✅ Harmonization complete for **1 dataset**.\n"
+                f"- Run ID: `{run_id}`\n"
+                f"- Samples: `{n_samples}`\n"
+                f"- Genes: `{n_genes}`\n\n"
+                "You can inspect the results in the main tabs."
+            )
+        else:
+            n_ds = len(multi_out.get("runs", {})) if multi_out else 0
+            reply = (
+                f"✅ Multi-dataset harmonization complete.\n"
+                f"- Run ID: `{run_id}`\n"
+                f"- Datasets: `{n_ds}`\n"
+                f"- Combined samples: `{n_samples}`\n"
+                f"- Genes: `{n_genes}`\n\n"
+                "You can inspect the results in the main tabs, including the **Multi-dataset Summary**."
+            )
+
+        return {
+            "reply": reply,
+            "out": out,
+            "multi": multi_out,
+            "run_id": run_id,
+        }
+
+    # ------------------------------
+    # Internal: summary of last run
+    # ------------------------------
+    def _cmd_summary(self) -> Dict[str, Any]:
+        if not self.last_result:
+            return {
+                "reply": "No harmonization run yet. Ask me to `run harmonization` first.",
+                "out": None,
+                "multi": None,
+                "run_id": None,
+            }
+
+        out = self.last_result["out"]
+        multi = self.last_result["multi"]
+        run_id = self.last_result["run_id"]
+
+        summary_lines = [f"📊 **Summary for run `{run_id}`**"]
+
+        # main report
+        try:
+            with open(out["report_json"], "r") as fh:
+                rep = json.load(fh)
+            qc = rep.get("qc", {})
+            shapes = rep.get("shapes", {})
+
+            summary_lines.append(
+                f"- Samples: `{shapes.get('samples', 'unknown')}`, "
+                f"Genes: `{shapes.get('genes', 'unknown')}`"
+            )
+            summary_lines.append(
+                f"- Platform: `{qc.get('platform', 'unknown')}`"
+            )
+            summary_lines.append(
+                f"- Harmonization mode: `{qc.get('harmonization_mode', 'unknown')}`"
+            )
+            summary_lines.append(
+                f"- Zero fraction: `{qc.get('zero_fraction', 'NA')}`"
+            )
+            if "silhouette_batch" in qc:
+                summary_lines.append(
+                    f"- Silhouette (batch): `{qc.get('silhouette_batch')}` (lower is better)"
+                )
+        except Exception:
+            summary_lines.append("- Could not read report.json for more details.")
+
+        # meta-analysis if multi
+        if multi and multi.get("meta_dir"):
+            meta_dir = multi["meta_dir"]
+            meta_csv = os.path.join(meta_dir, "meta_analysis_results.csv")
+            if os.path.exists(meta_csv):
+                try:
+                    import pandas as pd
+                    mdf = pd.read_csv(meta_csv, index_col=0)
+                    sig = mdf[mdf["q_meta"] < 0.10]
+                    summary_lines.append(
+                        f"- Meta-analysis significant genes (FDR < 0.1): `{sig.shape[0]}`"
+                    )
+                except Exception:
+                    pass
+
+        reply = "\n".join(summary_lines)
+        return {
+            "reply": reply,
+            "out": None,    # don't override Streamlit state
+            "multi": None,
+            "run_id": None,
+        }
