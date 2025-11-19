@@ -1073,12 +1073,21 @@ def run_pipeline(
         normalization, normalization_reason, lib_cv, zero_fraction, counts_like
     )
 
-    # Duplicate a compact "harmonized" view for easy consumption
+# Duplicate a compact "harmonized" view for easy consumption
+# In co_locate mode, HARM_DIR == OUTDIR and the files already live there,
+# so only copy when HARM_DIR is a *different* directory.
+if os.path.abspath(HARM_DIR) != os.path.abspath(OUTDIR):
     os.makedirs(HARM_DIR, exist_ok=True)
-    shutil.copy2(expr_harmonized_path, os.path.join(HARM_DIR, "expression_harmonized.tsv"))
-    shutil.copy2(pca_scores_path, os.path.join(HARM_DIR, "pca_scores.tsv"))
-    shutil.copy2(report_json_path, os.path.join(HARM_DIR, "report.json"))
-    shutil.copy2(os.path.join(OUTDIR, "normalization.txt"), os.path.join(HARM_DIR, "normalization.txt"))
+
+    def _safe_copy(src, dst_name):
+        dst = os.path.join(HARM_DIR, dst_name)
+        if os.path.abspath(src) != os.path.abspath(dst):
+            shutil.copy2(src, dst)
+
+    _safe_copy(expr_harmonized_path, "expression_harmonized.tsv")
+    _safe_copy(pca_scores_path, "pca_scores.tsv")
+    _safe_copy(report_json_path, "report.json")
+    _safe_copy(os.path.join(OUTDIR, "normalization.txt"), "normalization.txt")
 
     # Bundle (excluding bundle itself)
     zip_path = os.path.join(OUTDIR, "results_bundle.zip")
@@ -1293,3 +1302,4 @@ def run_pipeline_multi(
         "summary_png_path": meta.get("summary_png_path"),
     }
     return out
+
