@@ -840,7 +840,7 @@ with tabs[6]:
                             st.image(p, caption=f, use_column_width=True)
                 if st.button(f"🔀 Switch to: {name}", key=f"switch_{name}"):
                     st.session_state.selected_dataset = name
-                    st.experimental_rerun()
+                    st.rerun()
 
 # ---- Multi-dataset Summary
 with tabs[7]:
@@ -950,7 +950,7 @@ with tabs[8]:
             st.write("#### Top biomarker candidates (meta)")
             st.dataframe(
                 top_rows[["z_meta","p_meta","q_meta","consistent_dir","consistency","meta_log2FC_proxy"]],
-                use_container_width=True
+                use_column_width=True
             )
 
         if summary_txt and os.path.exists(summary_txt):
@@ -1036,7 +1036,7 @@ with tabs[9]:
                 de_overlap.loc[a,b] = None
             else:
                 de_overlap.loc[a,b] = len(A & B)
-        st.dataframe(de_overlap, use_container_width=True)
+        st.dataframe(de_overlap, use_column_width=True)
 
         st.caption(
             "Tip: Higher intersections and Jaccard suggest stronger similarity across datasets. "
@@ -1081,4 +1081,4 @@ with tabs[10]:
                 deg_root_link_or_id=drive_link_agent.strip() or None,
             )
             st.session_state.agent_messages.append(("agent", reply))
-            st.experimental_rerun()
+            st.rerun()
