@@ -1,4 +1,5 @@
 # app.py — Drive-aware harmonization UI with disease search & per-dataset comparisons
+import agent as ag  # NEW
 import os, io, tempfile, shutil, json
 import datetime as _dt
 import itertools
@@ -526,7 +527,7 @@ run_id = st.session_state.get("run_id")
 # Build tabs (NEW: added 'Dataset Index')
 tabs = st.tabs([
     "Overview","QC","PCA & Embeddings","DE & GSEA","Outliers","Files",
-    "Dataset Index","Multi-dataset Summary","Presenter Mode","Comparisons"
+    "Dataset Index","Multi-dataset Summary","Presenter Mode","Comparisons", "Agent"
 ])
 
 # ---- Overview
@@ -935,3 +936,37 @@ with tabs[9]:
 
         st.caption("Tip: Higher intersections and Jaccard suggest stronger similarity across datasets. "
                    "Meta-analysis above already aggregates signals from all datasets.")
+with tabs[10]:
+    st.markdown("### 🤖 Harmonization Agent")
+    st.caption(
+        "Talk to the agent. Examples:\n"
+        "- `search diabetes on drive`\n"
+        "- `run harmonization`\n"
+        "- `show summary`"
+    )
+
+    # Inputs the agent needs for Drive search
+    sa_json = st.file_uploader("Service Account JSON (for agent)", type=["json"], key="sa_json_agent")
+    drive_link_agent = st.text_input("deg_data folder (link or ID) for agent", value="", key="drive_link_agent")
+
+    # Show chat history
+    for role, msg in st.session_state.agent_messages:
+        if role == "user":
+            st.markdown(f"**You:** {msg}")
+        else:
+            st.markdown(f"**Agent:** {msg}")
+
+    user_msg = st.text_input("Command to agent", key="agent_input", placeholder="e.g. search diabetes on drive")
+    if st.button("Send to agent"):
+        if user_msg.strip():
+            st.session_state.agent_messages.append(("user", user_msg.strip()))
+            agent = st.session_state.agent
+            sa_bytes = sa_json.getvalue() if sa_json is not None else None
+            reply = agent.handle_command(
+                user_msg,
+                sa_json_bytes=sa_bytes,
+                deg_root_link_or_id=drive_link_agent.strip() or None,
+            )
+            st.session_state.agent_messages.append(("agent", reply))
+            st.experimental_rerun()
+
