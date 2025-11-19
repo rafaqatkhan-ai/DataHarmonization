@@ -207,8 +207,7 @@ if input_source == "Manual upload":
                 _BATCH_HINTS = ["batch","Batch","BATCH","center","Center","site","Site","location","Location","series","Series",
                                 "geo_series","GEO_series","run","Run","lane","Lane","plate","Plate","sequencer","Sequencer",
                                 "flowcell","Flowcell","library","Library","library_prep","LibraryPrep","study","Study","project",
-                                "Project","lab","Lab","date","Date","collection_date","CollectionDate","source_name_ch1","title",
-                                "characteristics_ch1","characteristics"]
+                                "Project","lab","Lab","date","Date","collection_date","CollectionDate","source_name_ch1","title","characteristics_ch1","characteristics"]
                 candidates = [c for c in _BATCH_HINTS if c in mprev.columns]
                 if candidates:
                     st.caption(f"Batch-like columns found: {candidates}")
@@ -246,13 +245,17 @@ if input_source == "Manual upload":
                         meta_file_i = st.file_uploader(f"Metadata {i+1}", type=["tsv","csv","txt","xlsx"], key=f"meta_{i}")
                     c1, c2, c3 = st.columns(3)
                     with c1:
-                        id_cols_i = st.text_input(f"ID columns {i+1}",
-                                                  "sample,Sample,Id,ID,id,CleanID,sample_id,Sample_ID,SampleID",
-                                                  key=f"idcols_{i}")
+                        id_cols_i = st.text_input(
+                            f"ID columns {i+1}",
+                            "sample,Sample,Id,ID,id,CleanID,sample_id,Sample_ID,SampleID",
+                            key=f"idcols_{i}"
+                        )
                     with c2:
-                        grp_cols_i = st.text_input(f"GROUP columns {i+1}",
-                                                   "group,Group,condition,Condition,phenotype,Phenotype",
-                                                   key=f"grpcols_{i}")
+                        grp_cols_i = st.text_input(
+                            f"GROUP columns {i+1}",
+                            "group,Group,condition,Condition,phenotype,Phenotype",
+                            key=f"grpcols_{i}"
+                        )
                     with c3:
                         batch_col_i = st.text_input(f"Batch column (optional) {i+1}", "", key=f"batchcol_{i}")
 
@@ -267,9 +270,11 @@ if input_source == "Manual upload":
                         })
 
         with st.expander("2) Multi-dataset settings"):
-            combine_thresh = st.number_input("Minimum overlapping genes to combine", min_value=500, max_value=100000,
-                                             value=3000, step=250,
-                                             help="If overlap ≥ this, datasets are combined; otherwise analyzed separately.")
+            combine_thresh = st.number_input(
+                "Minimum overlapping genes to combine", min_value=500, max_value=100000,
+                value=3000, step=250,
+                help="If overlap ≥ this, datasets are combined; otherwise analyzed separately."
+            )
 
 # =========================
 # Drive Ingestion Controls
@@ -278,14 +283,24 @@ if input_source == "Google Drive (deg_data)":
     st.subheader("🔗 Google Drive Ingestion (deg_data)")
     st.caption("Provide a **Service Account JSON** and share your deg_data folder with its `client_email` as **Viewer**.")
     json_file = st.file_uploader("Service Account JSON", type=["json"], key="sa_json")
-    drive_link = st.text_input("deg_data root folder link (or ID)", value="", help="Example: https://drive.google.com/drive/folders/<ID>")
-    disease_query = st.text_input("Disease keywords (space or comma separated)", value="",
-                                  help="e.g., acute, myeloid, leukemia — matches any token against disease folder names")
+    drive_link = st.text_input(
+        "deg_data root folder link (or ID)", value="",
+        help="Example: https://drive.google.com/drive/folders/<ID>"
+    )
+    disease_query = st.text_input(
+        "Disease keywords (space or comma separated)", value="",
+        help="e.g., acute, myeloid, leukemia — matches any token against disease folder names"
+    )
     out_dir = st.text_input("Output directory", "out")
-    pca_topk = st.number_input("Top variable genes for PCA", min_value=500, max_value=50000, value=5000, step=500, key="pca_topk_drive")
+    pca_topk = st.number_input(
+        "Top variable genes for PCA", min_value=500, max_value=50000,
+        value=5000, step=500, key="pca_topk_drive"
+    )
     do_nonlinear = st.checkbox("Make UMAP/t-SNE (if available)", value=True, key="do_nonlinear_drive")
-    combine_thresh = st.number_input("Minimum overlapping genes to combine (multi-dataset)", min_value=500, max_value=100000,
-                                     value=3000, step=250, key="combine_drive")
+    combine_thresh = st.number_input(
+        "Minimum overlapping genes to combine (multi-dataset)", min_value=500, max_value=100000,
+        value=3000, step=250, key="combine_drive"
+    )
 
 # =========================
 # Run Button
@@ -301,7 +316,8 @@ if run:
         # ----- Manual paths -----
         if mode == "Multiple datasets (each has its own metadata)":
             if not multi_datasets or len(multi_datasets) < 2:
-                st.error("Please provide at least two datasets (each with expression + metadata)."); st.stop()
+                st.error("Please provide at least two datasets (each with expression + metadata).")
+                st.stop()
             kwargs_multi = {
                 "datasets": multi_datasets,
                 "attempt_combine": True,
@@ -319,6 +335,7 @@ if run:
                     st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
                     st.session_state.run_token = f"{run_id}-{_dt.datetime.now().timestamp():.0f}"
                     st.session_state.multi = multi_out
+                    # safe to write here (before widgets)
                     if multi_out.get("combined"):
                         st.session_state.selected_dataset = "[Combined]"
                     else:
@@ -329,7 +346,8 @@ if run:
                 st.stop()
         else:
             if not metadata_file:
-                st.error("Please upload a metadata file."); st.stop()
+                st.error("Please upload a metadata file.")
+                st.stop()
 
             kwargs = {
                 "metadata_file": io.BytesIO(metadata_file.getvalue()),
@@ -346,7 +364,8 @@ if run:
             if gmt_file:
                 tmpdir = tempfile.mkdtemp()
                 gmt_path = os.path.join(tmpdir, gmt_file.name)
-                with open(gmt_path, "wb") as fh: fh.write(gmt_file.getvalue())
+                with open(gmt_path, "wb") as fh:
+                    fh.write(gmt_file.getvalue())
                 kwargs["gsea_gmt"] = gmt_path
 
             if mode == "Multiple files (one per group)":
@@ -356,11 +375,13 @@ if run:
                 if hpv_pos_file: groups["Third"] = io.BytesIO(hpv_pos_file.getvalue())
                 if hpv_neg_file: groups["Fourth"] = io.BytesIO(hpv_neg_file.getvalue())
                 if not groups:
-                    st.error("Please upload at least one expression file."); st.stop()
+                    st.error("Please upload at least one expression file.")
+                    st.stop()
                 kwargs["group_to_file"] = groups
             else:
                 if not single_expr_file:
-                    st.error("Please upload the expression matrix."); st.stop()
+                    st.error("Please upload the expression matrix.")
+                    st.stop()
                 kwargs["single_expression_file"] = io.BytesIO(single_expr_file.getvalue())
                 kwargs["single_expression_name_hint"] = single_expr_file.name
 
@@ -382,9 +403,11 @@ if run:
         # ----- Drive ingestion path -----
         json_file = st.session_state.get("sa_json") or json_file
         if not json_file:
-            st.error("Please upload your Service Account JSON."); st.stop()
+            st.error("Please upload your Service Account JSON.")
+            st.stop()
         if not drive_link.strip():
-            st.error("Please paste your deg_data root folder link or ID."); st.stop()
+            st.error("Please paste your deg_data root folder link or ID.")
+            st.stop()
 
         try:
             with st.spinner("Connecting to Drive and building ingestion plan..."):
@@ -475,6 +498,7 @@ if run:
                 st.session_state.out = (multi_out.get("combined") or next(iter(multi_out["runs"].values())))
                 st.session_state.run_token = f"{st.session_state.run_id}-{_dt.datetime.now().timestamp():.0f}"
                 st.session_state.multi = multi_out
+                # safe: before widgets
                 if multi_out.get("combined"):
                     st.session_state.selected_dataset = "[Combined]"
                 else:
@@ -489,20 +513,27 @@ if run:
 # =========================
 st.subheader("Results")
 
-# Helper: pick current dataset output based on selector
+# Helper: pick current dataset output based on selector (READ-ONLY)
 def _get_current_out():
     multi_ctx = st.session_state.get("multi")
     sel = st.session_state.get("selected_dataset")
     if multi_ctx and isinstance(multi_ctx, dict) and multi_ctx.get("runs"):
         has_combined = bool(multi_ctx.get("combined"))
         run_keys = list(multi_ctx["runs"].keys())
-        valid = (["[Combined]"] if has_combined else []) + run_keys
-        if not sel or sel not in valid:
-            st.session_state.selected_dataset = "[Combined]" if has_combined else (run_keys[0] if run_keys else None)
-            sel = st.session_state.selected_dataset
-        if sel == "[Combined]":
+
+        # Use selection if valid
+        if sel == "[Combined]" and has_combined:
             return multi_ctx.get("combined") or st.session_state.get("out")
-        return multi_ctx["runs"][sel]
+        if sel in run_keys:
+            return multi_ctx["runs"][sel]
+
+        # Fallbacks without mutating session_state
+        if has_combined:
+            return multi_ctx["combined"]
+        if run_keys:
+            return multi_ctx["runs"][run_keys[0]]
+        return None
+    # single run
     return st.session_state.get("out")
 
 # Sidebar selector (when multi)
@@ -511,11 +542,16 @@ if multi_ctx and isinstance(multi_ctx, dict) and multi_ctx.get("runs"):
     has_combined = bool(multi_ctx.get("combined"))
     run_keys = list(multi_ctx["runs"].keys())
     options = (["[Combined]"] if has_combined else []) + run_keys
+
+    # default_index purely local (widget will set session_state)
     default_index = 0
     if st.session_state.get("selected_dataset") in options:
         default_index = options.index(st.session_state["selected_dataset"])
+
     st.sidebar.markdown("### 📂 Dataset view")
-    selected_key = st.sidebar.selectbox("Select dataset", options, index=default_index, key="selected_dataset")
+    st.sidebar.selectbox(
+        "Select dataset", options, index=default_index, key="selected_dataset"
+    )
     with st.sidebar.expander("Per-dataset quick links", expanded=False):
         if has_combined:
             st.write("• **[Combined]**")
@@ -541,7 +577,8 @@ with tabs[0]:
     else:
         report = {}
         try:
-            with open(out_curr["report_json"], "r") as fh: report = json.load(fh)
+            with open(out_curr["report_json"], "r") as fh:
+                report = json.load(fh)
         except Exception:
             pass
 
@@ -586,31 +623,40 @@ with tabs[0]:
 
 # ---- QC
 with tabs[1]:
-    if not out_curr: st.info("No run loaded yet.")
+    if not out_curr:
+        st.info("No run loaded yet.")
     else:
         fig_dir = out_curr["figdir"]
-        qc_figs = ["qc_library_size.png","qc_zero_rate_hist.png","group_density_post_log2.png",
-                   "dist_zscore.png","sample_correlation_heatmap.png","hk_cv.png","sex_marker_concordance.png"]
+        qc_figs = [
+            "qc_library_size.png","qc_zero_rate_hist.png","group_density_post_log2.png",
+            "dist_zscore.png","sample_correlation_heatmap.png","hk_cv.png","sex_marker_concordance.png"
+        ]
         st.write("### QC Figures")
         for f in qc_figs:
             p = os.path.join(fig_dir, f)
-            if os.path.exists(p): st.image(p, caption=f, use_column_width=True)
+            if os.path.exists(p):
+                st.image(p, caption=f, use_column_width=True)
 
 # ---- PCA & Embeddings
 with tabs[2]:
-    if not out_curr: st.info("No run loaded yet.")
+    if not out_curr:
+        st.info("No run loaded yet.")
     else:
         fig_dir = out_curr["figdir"]
-        pcs = ["pca_clean_groups.png","enhanced_pca_analysis.png","pca_loadings_pc1.png",
-               "pca_loadings_pc2.png","umap_by_group.png","tsne_by_group.png"]
+        pcs = [
+            "pca_clean_groups.png","enhanced_pca_analysis.png","pca_loadings_pc1.png",
+            "pca_loadings_pc2.png","umap_by_group.png","tsne_by_group.png"
+        ]
         st.write("### PCA / UMAP / t-SNE")
         for f in pcs:
             p = os.path.join(fig_dir, f)
-            if os.path.exists(p): st.image(p, caption=os.path.basename(p), use_column_width=True)
+            if os.path.exists(p):
+                st.image(p, caption=os.path.basename(p), use_column_width=True)
 
 # ---- DE & GSEA
 with tabs[3]:
-    if not out_curr: st.info("No run loaded yet.")
+    if not out_curr:
+        st.info("No run loaded yet.")
     else:
         fig_dir = out_curr["figdir"]
         de_dir = os.path.join(out_curr["outdir"], "de")
@@ -618,18 +664,23 @@ with tabs[3]:
         contrasts = sorted([f.replace("DE_","").replace(".tsv","") for f in de_files if f.startswith("DE_")])
         pick = st.selectbox("Select contrast", contrasts) if contrasts else None
         if pick:
-            for pth in [os.path.join(fig_dir, f"volcano_{pick}.png"),
-                        os.path.join(fig_dir, f"ma_{pick}.png"),
-                        os.path.join(fig_dir, f"heatmap_top_50_{pick}.png")]:
-                if os.path.exists(pth): st.image(pth, caption=os.path.basename(pth), use_column_width=True)
+            for pth in [
+                os.path.join(fig_dir, f"volcano_{pick}.png"),
+                os.path.join(fig_dir, f"ma_{pick}.png"),
+                os.path.join(fig_dir, f"heatmap_top_50_{pick}.png")
+            ]:
+                if os.path.exists(pth):
+                    st.image(pth, caption=os.path.basename(pth), use_column_width=True)
             tsv = os.path.join(de_dir, f"DE_{pick}.tsv")
             try:
                 df = pd.read_csv(tsv, sep="\t", index_col=0).head(50)
-                st.dataframe(df, use_container_width=True, key=f"de_table__{run_id}__{pick}")
+                st.dataframe(df, use_column_width=True, key=f"de_table__{run_id}__{pick}")
                 with open(tsv, "rb") as fh:
-                    safe_download_button("⬇️ Download full DE table", fh.read(),
-                                         file_name=f"DE_{pick}.tsv", mime="text/tab-separated-values",
-                                         key=f"dl_de__{run_id}__{pick}")
+                    safe_download_button(
+                        "⬇️ Download full DE table", fh.read(),
+                        file_name=f"DE_{pick}.tsv", mime="text/tab-separated-values",
+                        key=f"dl_de__{run_id}__{pick}"
+                    )
             except Exception:
                 pass
         gsea_dir = os.path.join(out_curr["outdir"], "gsea")
@@ -640,13 +691,14 @@ with tabs[3]:
                     st.write(f)
                     try:
                         df = pd.read_csv(os.path.join(gsea_dir, f), sep="\t").head(30)
-                        st.dataframe(df, use_container_width=True, key=f"gsea_{run_id}__{f}")
+                        st.dataframe(df, use_column_width=True, key=f"gsea_{run_id}__{f}")
                     except Exception:
                         pass
 
 # ---- Outliers
 with tabs[4]:
-    if not out_curr: st.info("No run loaded yet.")
+    if not out_curr:
+        st.info("No run loaded yet.")
     else:
         outliers_path = os.path.join(out_curr["outdir"], "outliers.tsv")
         meta_path = os.path.join(out_curr["outdir"], "metadata.tsv")
@@ -660,17 +712,23 @@ with tabs[4]:
                     grp_col = "group_raw" if "group_raw" in meta_df.columns else "group"
                     display_df = (
                         df.copy().assign(sample=df.index)
-                        .join(meta_df[["bare_id", grp_col]].rename(columns={grp_col: "group"}), how="left")
-                        .set_index("sample").rename(columns={"IsolationForest":"IsolationForest_flag","LOF":"LOF_flag"})
+                        .join(
+                            meta_df[["bare_id", grp_col]].rename(columns={grp_col: "group"}),
+                            how="left"
+                        )
+                        .set_index("sample")
+                        .rename(columns={"IsolationForest":"IsolationForest_flag","LOF":"LOF_flag"})
                         [["bare_id","group","IsolationForest_flag","LOF_flag"]]
                     )
                 else:
                     display_df = df.rename(columns={"IsolationForest":"IsolationForest_flag","LOF":"LOF_flag"})
                 st.write("### Outlier flags (1 = outlier)")
-                st.dataframe(display_df, use_container_width=True, key=f"outliers_df__{cache_buster}")
+                st.dataframe(display_df, use_column_width=True, key=f"outliers_df__{cache_buster}")
                 with open(outliers_path, "rb") as fh:
-                    safe_download_button("⬇️ Download outlier table", fh.read(), file_name="outliers.tsv",
-                                         mime="text/tab-separated-values", key=f"dl_outliers__{cache_buster}")
+                    safe_download_button(
+                        "⬇️ Download outlier table", fh.read(), file_name="outliers.tsv",
+                        mime="text/tab-separated-values", key=f"dl_outliers__{cache_buster}"
+                    )
             except Exception as e:
                 st.warning(f"Could not load outliers for this run: {e}")
         else:
@@ -678,7 +736,8 @@ with tabs[4]:
 
 # ---- Files
 with tabs[5]:
-    if not out_curr: st.info("No run loaded yet.")
+    if not out_curr:
+        st.info("No run loaded yet.")
     else:
         colA, colB = st.columns(2)
         with colA:
@@ -693,15 +752,19 @@ with tabs[5]:
             for label, path in core_files:
                 if os.path.exists(path):
                     with open(path, "rb") as fh:
-                        safe_download_button(f"⬇️ {label}", fh.read(),
-                                             file_name=os.path.basename(path), mime="text/plain",
-                                             use_container_width=True, key=f"dl_core__{run_id}__{label}")
+                        safe_download_button(
+                            f"⬇️ {label}", fh.read(),
+                            file_name=os.path.basename(path), mime="text/plain",
+                            use_container_width=True, key=f"dl_core__{run_id}__{label}"
+                        )
         with colB:
             try:
                 with open(out_curr["zip"], "rb") as fh:
-                    safe_download_button("⬇️ Download ALL results (ZIP)", fh.read(),
-                                         file_name="harmonization_results.zip", mime="application/zip",
-                                         use_container_width=True, key=f"dl_zip__{run_id}")
+                    safe_download_button(
+                        "⬇️ Download ALL results (ZIP)", fh.read(),
+                        file_name="harmonization_results.zip", mime="application/zip",
+                        use_container_width=True, key=f"dl_zip__{run_id}"
+                    )
             except Exception as e:
                 st.warning(f"Could not open ZIP for download: {e}")
 
@@ -774,9 +837,11 @@ with tabs[7]:
             with open(summary_txt, "r") as fh:
                 st.code(fh.read(), language="markdown")
             with open(summary_txt, "rb") as fh:
-                safe_download_button("⬇️ Download summary (TXT)", fh.read(),
-                                     file_name="final_analysis_summary.txt",
-                                     mime="text/plain", key="dl_summary_txt__{run_id}")
+                safe_download_button(
+                    "⬇️ Download summary (TXT)", fh.read(),
+                    file_name="final_analysis_summary.txt",
+                    mime="text/plain", key=f"dl_summary_txt__{run_id}"
+                )
 
         if summary_png and os.path.exists(summary_png):
             st.image(summary_png, caption=os.path.basename(summary_png), use_column_width=True)
@@ -796,13 +861,17 @@ with tabs[7]:
                 p = os.path.join(meta_dir, f)
                 if os.path.exists(p):
                     with open(p, "rb") as fh:
-                        safe_download_button(f"⬇️ {f}", fh.read(), file_name=f, mime="text/csv",
-                                             use_container_width=True, key=f"dl_meta_{f}_{run_id}")
+                        safe_download_button(
+                            f"⬇️ {f}", fh.read(), file_name=f, mime="text/csv",
+                            use_container_width=True, key=f"dl_meta_{f}_{run_id}"
+                        )
         if outputs_zip and os.path.exists(outputs_zip):
             with open(outputs_zip, "rb") as fh:
-                safe_download_button("⬇️ Download ALL combined results (ZIP)", fh.read(),
-                                     file_name="harmonization_results.zip", mime="application/zip",
-                                     use_container_width=True, key=f"dl_zip_multi__{run_id}")
+                safe_download_button(
+                    "⬇️ Download ALL combined results (ZIP)", fh.read(),
+                    file_name="harmonization_results.zip", mime="application/zip",
+                    use_container_width=True, key=f"dl_zip_multi__{run_id}"
+                )
 
 # ---- Presenter Mode
 with tabs[8]:
@@ -844,8 +913,10 @@ with tabs[8]:
 
         if len(top_rows):
             st.write("#### Top biomarker candidates (meta)")
-            st.dataframe(top_rows[["z_meta","p_meta","q_meta","consistent_dir","consistency","meta_log2FC_proxy"]],
-                         use_column_width=True)
+            st.dataframe(
+                top_rows[["z_meta","p_meta","q_meta","consistent_dir","consistency","meta_log2FC_proxy"]],
+                use_container_width=True
+            )
 
         if summary_txt and os.path.exists(summary_txt):
             with open(summary_txt, "r") as fh:
@@ -878,7 +949,7 @@ with tabs[9]:
                 "platform": qc.get("platform", None),
             })
         if basic_rows:
-            st.dataframe(pd.DataFrame(basic_rows).set_index("dataset"), use_column_width=True)
+            st.dataframe(pd.DataFrame(basic_rows).set_index("dataset"), use_container_width=True)
 
         def load_genes(path):
             try:
@@ -902,7 +973,7 @@ with tabs[9]:
                 inter.loc[a,b] = inter_set
                 jacc.loc[a,b] = inter_set / union_set if union_set else None
         st.write("#### Gene overlap (intersection counts)")
-        st.dataframe(inter, use_container_width=True)
+        st.dataframe(inter, use_column_width=True)
         st.write("#### Jaccard index of gene overlap")
         st.dataframe(jacc, use_column_width=True)
 
