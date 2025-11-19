@@ -1073,11 +1073,11 @@ def run_pipeline(
         normalization, normalization_reason, lib_cv, zero_fraction, counts_like
     )
 
-# Duplicate a compact "harmonized" view for easy consumption
-# In co_locate mode, HARM_DIR == OUTDIR and the files already live there,
-# so only copy when HARM_DIR is a *different* directory.
-if os.path.abspath(HARM_DIR) != os.path.abspath(OUTDIR):
-    os.makedirs(HARM_DIR, exist_ok=True)
+    # Duplicate a compact "harmonized" view for easy consumption
+    # In co_locate mode, HARM_DIR == OUTDIR and the files already live there,
+    # so only copy when HARM_DIR is a *different* directory.
+    if os.path.abspath(HARM_DIR) != os.path.abspath(OUTDIR):
+        os.makedirs(HARM_DIR, exist_ok=True)
 
     def _safe_copy(src, dst_name):
         dst = os.path.join(HARM_DIR, dst_name)
@@ -1302,4 +1302,5 @@ def run_pipeline_multi(
         "summary_png_path": meta.get("summary_png_path"),
     }
     return out
+
 
